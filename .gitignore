@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Virtual environment
+venv/
+env/
+ENV/
+.env
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Domoticz specific
+*.db
+*.log
