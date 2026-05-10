@@ -1,39 +1,33 @@
-# Domoticz KPN Experia Box V10 Plugin
+<div align="center">
+  <img src="logo.png" alt="KPN Experia Box V10" width="200" />
+</div>
 
-This is a Python plugin for Domoticz to track devices connected to a KPN Experia Box V10. 
-It creates a presence switch (On/Off) for devices connected to the router.
+# Domoticz KPN Experia Box V10 Device Tracker
 
-## Features (Planned)
-* Authenticates with the KPN Experia Box V10 web interface.
-* Periodically fetches connected devices (LAN & WLAN).
-* Creates and updates Domoticz switch devices to indicate presence.
+Welcome! This is a little Python plugin for Domoticz that tracks the presence of devices connected to your trusty KPN Experia Box V10. 
 
-## Prerequisites
-* Domoticz running with Python plugin support enabled.
-* Access to the KPN Experia Box V10 web interface (IP address, Username, and Password).
+It periodically asks your router who is home, and flips a Domoticz switch for each MAC address it finds. Simple, effective, and hopefully magical! 🪄
 
-## Installation
+## 🚀 Features (Coming Soon!)
+* Talks to the Experia Box V10 web interface.
+* Tracks LAN and WLAN devices.
+* Auto-creates Domoticz switches for presence detection.
 
-1. Clone this repository into your Domoticz plugins directory:
+## 🛠️ Installation
 
-```bash
-cd domoticz/plugins
-git clone https://github.com/adrighem/domoticz-kpn-experia-v10.git experiav10
-```
+1. Grab the plugin and toss it into your Domoticz plugins folder:
+   ```bash
+   cd domoticz/plugins
+   git clone https://github.com/adrighem/domoticz-kpn-experia-v10.git experiav10
+   ```
+2. Give Domoticz a quick reboot:
+   ```bash
+   sudo systemctl restart domoticz
+   ```
+3. Head to **Setup** -> **Hardware** in your Domoticz UI.
+4. Add **KPN Experia Box V10 Device Tracker**.
+5. Feed it your Router IP, Username, and Password.
+6. Click **Add** and watch the magic happen! ✨
 
-2. Restart the Domoticz service:
-
-```bash
-sudo systemctl restart domoticz
-```
-
-3. Go to the Domoticz interface -> **Setup** -> **Hardware**.
-4. Add new hardware of type: **KPN Experia Box V10 Device Tracker**.
-5. Fill in the **Router IP Address**, **Username**, and **Password**.
-6. Set the desired **Update interval** and click **Add**.
-
-## Development
-This repository provides the skeleton. The core logic for communicating with the Experia Box V10 is to be implemented.
-
-## License
-This project is licensed under the GPLv3 License - see the [LICENSE](LICENSE) file for details.
+## 📜 License
+Licensed under [GPLv3](LICENSE) — free to use, share, and improve.
