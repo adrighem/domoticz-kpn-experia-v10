@@ -4,18 +4,15 @@
 
 # Domoticz KPN Experia Box V10 Device Tracker
 
-Welcome! This is an upcoming Python plugin for Domoticz designed to track the presence of devices connected to your trusty KPN Experia Box V10. 
+Welcome! This is a Python plugin for Domoticz designed to track the presence of devices connected to your trusty KPN Experia Box V10, along with a bunch of other handy metrics and controls.
 
-⚠️ **Current Status: Skeleton Phase!** ⚠️
-Right now, the plugin is just an empty shell. It has the Domoticz UI configuration parameters set up, but the actual logic to talk to the router is not yet implemented. If you install it, it won't do much (yet!).
+It periodically asks your router who is home, and flips a Domoticz switch for each MAC address it finds. Simple, effective, and hopefully magical! 🪄
 
-## 🚀 Features (Planned)
-* **Who's home?** Tracks all connected LAN and WLAN devices using robust network topology traversal.
-* **Dialect support:** Fluent in both the old router language and the shiny new "KPN Software" (V10.C.26.02.06+) dialect.
-* **Speed & Greed:** Real-time download/upload speeds and total data consumption.
-* **Vitals:** External IP, WAN link status, active client count, and router uptime.
-* **Intruder Alert:** Warns you when a wild new device appears on your network.
-* **The Big Buttons:** Reboot the router or toggle Guest Wi-Fi straight from Domoticz.
+## 🚀 Features
+* **Who's home?** Tracks all connected wireless devices (and optionally wired devices) using network topology traversal.
+* **The Big Buttons:** Reboot the router, toggle Global Wi-Fi, or toggle Guest Wi-Fi straight from Domoticz.
+* **Vitals:** Monitors your Internet Connection status and your External IP address.
+* **Speed & Greed:** Keeps track of total data received and sent (Incremental counters in MB).
 
 ## 🛠️ Installation
 
