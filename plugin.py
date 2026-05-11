@@ -219,41 +219,32 @@ class ExperiaPlugin:
                 Devices["TRAFFIC_RX_MB"].Units[1].Delete()
             if "TRAFFIC_TX_MB" in Devices and 1 in Devices["TRAFFIC_TX_MB"].Units:
                 Devices["TRAFFIC_TX_MB"].Units[1].Delete()
+            if "TRAFFIC_RX_INC" in Devices and 1 in Devices["TRAFFIC_RX_INC"].Units:
+                Devices["TRAFFIC_RX_INC"].Units[1].Delete()
+            if "TRAFFIC_TX_INC" in Devices and 1 in Devices["TRAFFIC_TX_INC"].Units:
+                Devices["TRAFFIC_TX_INC"].Units[1].Delete()
             
-            if "TRAFFIC_RX_INC" not in Devices or 1 not in Devices["TRAFFIC_RX_INC"].Units:
-                Domoticz.Log("Creating Traffic RX Incremental Counter")
-                Domoticz.Unit(Name="Data Received (MB)", DeviceID="TRAFFIC_RX_INC", Unit=1, TypeName="Counter Incremental").Create()
-            if "TRAFFIC_TX_INC" not in Devices or 1 not in Devices["TRAFFIC_TX_INC"].Units:
-                Domoticz.Log("Creating Traffic TX Incremental Counter")
-                Domoticz.Unit(Name="Data Sent (MB)", DeviceID="TRAFFIC_TX_INC", Unit=1, TypeName="Counter Incremental").Create()
+            if "TRAFFIC_RX" not in Devices or 1 not in Devices["TRAFFIC_RX"].Units:
+                Domoticz.Log("Creating Traffic RX Counter")
+                Domoticz.Unit(Name="Data Received (KB)", DeviceID="TRAFFIC_RX", Unit=1, TypeName="Counter").Create()
+            if "TRAFFIC_TX" not in Devices or 1 not in Devices["TRAFFIC_TX"].Units:
+                Domoticz.Log("Creating Traffic TX Counter")
+                Domoticz.Unit(Name="Data Sent (KB)", DeviceID="TRAFFIC_TX", Unit=1, TypeName="Counter").Create()
                 
             rx_bytes = traffic_info["rx_bytes"]
             tx_bytes = traffic_info["tx_bytes"]
 
-            if self.last_rx_bytes is not None and self.last_tx_bytes is not None:
-                # Calculate delta
-                rx_delta = rx_bytes - self.last_rx_bytes
-                tx_delta = tx_bytes - self.last_tx_bytes
-                
-                # Handle router reboot (counters reset to 0)
-                if rx_delta < 0:
-                    rx_delta = rx_bytes
-                if tx_delta < 0:
-                    tx_delta = tx_bytes
-                    
-                rx_mb_delta = round(rx_delta / 1048576, 2)
-                tx_mb_delta = round(tx_delta / 1048576, 2)
-                
-                if "TRAFFIC_RX_INC" in Devices and 1 in Devices["TRAFFIC_RX_INC"].Units:
-                    if rx_mb_delta > 0:
-                        Devices["TRAFFIC_RX_INC"].Units[1].Update(nValue=0, sValue=str(rx_mb_delta), Log=True)
+            # Domoticz Counter type expects the absolute total value.
+            # Domoticz natively handles counter resets if the new value is lower than the previous one.
+            # We pass KB (divide by 1024) to keep it as an integer and avoid losing precision like we would with MBs.
+            rx_kb = rx_bytes // 1024
+            tx_kb = tx_bytes // 1024
+            
+            if "TRAFFIC_RX" in Devices and 1 in Devices["TRAFFIC_RX"].Units:
+                Devices["TRAFFIC_RX"].Units[1].Update(nValue=0, sValue=str(rx_kb), Log=True)
 
-                if "TRAFFIC_TX_INC" in Devices and 1 in Devices["TRAFFIC_TX_INC"].Units:
-                    if tx_mb_delta > 0:
-                        Devices["TRAFFIC_TX_INC"].Units[1].Update(nValue=0, sValue=str(tx_mb_delta), Log=True)
-
-            self.last_rx_bytes = rx_bytes
-            self.last_tx_bytes = tx_bytes
+            if "TRAFFIC_TX" in Devices and 1 in Devices["TRAFFIC_TX"].Units:
+                Devices["TRAFFIC_TX"].Units[1].Update(nValue=0, sValue=str(tx_kb), Log=True)
 
         except Exception as e:
             Domoticz.Error(f"Error fetching Traffic info: {e}")
