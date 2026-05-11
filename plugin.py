@@ -215,14 +215,12 @@ class ExperiaPlugin:
             traffic_info = self.get_traffic_info()
             
             # Clean up old Custom Sensor devices if they exist
-            if "TRAFFIC_RX_MB" in Devices and 1 in Devices["TRAFFIC_RX_MB"].Units:
-                Devices["TRAFFIC_RX_MB"].Units[1].Delete()
-            if "TRAFFIC_TX_MB" in Devices and 1 in Devices["TRAFFIC_TX_MB"].Units:
-                Devices["TRAFFIC_TX_MB"].Units[1].Delete()
-            if "TRAFFIC_RX_INC" in Devices and 1 in Devices["TRAFFIC_RX_INC"].Units:
-                Devices["TRAFFIC_RX_INC"].Units[1].Delete()
-            if "TRAFFIC_TX_INC" in Devices and 1 in Devices["TRAFFIC_TX_INC"].Units:
-                Devices["TRAFFIC_TX_INC"].Units[1].Delete()
+            for old_dev in ["TRAFFIC_RX_MB", "TRAFFIC_TX_MB", "TRAFFIC_RX_INC", "TRAFFIC_TX_INC"]:
+                if old_dev in Devices and 1 in Devices[old_dev].Units:
+                    try:
+                        Devices[old_dev].Units[1].Delete()
+                    except Exception as e:
+                        Domoticz.Log(f"Notice: Failed to delete {old_dev} (may already be removed): {e}")
             
             if "TRAFFIC_RX" not in Devices or 1 not in Devices["TRAFFIC_RX"].Units:
                 Domoticz.Log("Creating Traffic RX Counter")
@@ -241,10 +239,18 @@ class ExperiaPlugin:
             tx_kb = tx_bytes // 1024
             
             if "TRAFFIC_RX" in Devices and 1 in Devices["TRAFFIC_RX"].Units:
-                Devices["TRAFFIC_RX"].Units[1].Update(nValue=0, sValue=str(rx_kb), Log=True)
+                ha_unit = Devices["TRAFFIC_RX"].Units[1]
+                if ha_unit.sValue != str(rx_kb):
+                    ha_unit.nValue = 0
+                    ha_unit.sValue = str(rx_kb)
+                    ha_unit.Update(Log=True)
 
             if "TRAFFIC_TX" in Devices and 1 in Devices["TRAFFIC_TX"].Units:
-                Devices["TRAFFIC_TX"].Units[1].Update(nValue=0, sValue=str(tx_kb), Log=True)
+                ha_unit = Devices["TRAFFIC_TX"].Units[1]
+                if ha_unit.sValue != str(tx_kb):
+                    ha_unit.nValue = 0
+                    ha_unit.sValue = str(tx_kb)
+                    ha_unit.Update(Log=True)
 
         except Exception as e:
             Domoticz.Error(f"Error fetching Traffic info: {e}")
