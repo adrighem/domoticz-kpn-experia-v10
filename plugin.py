@@ -215,19 +215,21 @@ class ExperiaPlugin:
             traffic_info = self.get_traffic_info()
             
             # Clean up old Custom Sensor devices if they exist
-            for old_dev in ["TRAFFIC_RX_MB", "TRAFFIC_TX_MB", "TRAFFIC_RX_INC", "TRAFFIC_TX_INC"]:
+            for old_dev in ["TRAFFIC_RX_MB", "TRAFFIC_TX_MB", "TRAFFIC_RX_INC", "TRAFFIC_TX_INC", "TRAFFIC_RX", "TRAFFIC_TX"]:
                 if old_dev in Devices and 1 in Devices[old_dev].Units:
                     try:
-                        Devices[old_dev].Units[1].Delete()
+                        # Only delete if it's the broken TypeName="Counter" which ended up as Type 243 (General)
+                        if Devices[old_dev].Units[1].Type != 113:
+                            Devices[old_dev].Units[1].Delete()
                     except Exception as e:
                         Domoticz.Log(f"Notice: Failed to delete {old_dev} (may already be removed): {e}")
             
             if "TRAFFIC_RX" not in Devices or 1 not in Devices["TRAFFIC_RX"].Units:
                 Domoticz.Log("Creating Traffic RX Counter")
-                Domoticz.Unit(Name="Data Received (KB)", DeviceID="TRAFFIC_RX", Unit=1, TypeName="Counter").Create()
+                Domoticz.Unit(Name="Data Received (KB)", DeviceID="TRAFFIC_RX", Unit=1, Type=113, Subtype=0, Switchtype=3).Create()
             if "TRAFFIC_TX" not in Devices or 1 not in Devices["TRAFFIC_TX"].Units:
                 Domoticz.Log("Creating Traffic TX Counter")
-                Domoticz.Unit(Name="Data Sent (KB)", DeviceID="TRAFFIC_TX", Unit=1, TypeName="Counter").Create()
+                Domoticz.Unit(Name="Data Sent (KB)", DeviceID="TRAFFIC_TX", Unit=1, Type=113, Subtype=0, Switchtype=3).Create()
                 
             rx_bytes = traffic_info["rx_bytes"]
             tx_bytes = traffic_info["tx_bytes"]
