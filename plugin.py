@@ -263,20 +263,14 @@ class ExperiaPlugin:
             Domoticz.Unit(Name="Reboot Modem", DeviceID="REBOOT_MODEM", Unit=1, Type=244, Subtype=73, Switchtype=9).Create()
 
     def get_guest_wifi_status(self):
-        data = self._request("sah.Device.WiFi.Radio", "get", endpoint="ws")
-        status = data.get("status")
-        if not isinstance(status, list):
-            return False, None
-        for entry in status:
-            if isinstance(entry, dict) and "Guest" in str(entry.get("SSID", "")):
-                return entry.get("Enable", False), entry.get("UID")
+        data = self._request("NMC.Guest", "get", endpoint="ws")
+        status = data.get("status", {})
+        if isinstance(status, dict):
+            return status.get("Enable", False), "NMC.Guest"
         return False, None
 
     def set_guest_wifi_status(self, enable, uid=None):
-        if not uid:
-            _, uid = self.get_guest_wifi_status()
-        if uid:
-            self._request("sah.Device.WiFi.Radio", "set", {"uid": uid, "Enable": enable}, endpoint="ws")
+        self._request("NMC.Guest", "set", {"Enable": enable}, endpoint="ws")
 
     def get_wan_info(self):
         data = self._request("NMC", "getWANStatus")
@@ -413,7 +407,7 @@ class ExperiaPlugin:
                     error_code = data["errors"][0].get("error")
                     
                 if error_code is not None:
-                    if str(error_code) in ("196621", "196614", "9003"):
+                    if str(error_code) in ("196621", "196614", "9003", "13"):
                         self.context_id = None
                         self.cookie = None
                         # Re-authenticate once
