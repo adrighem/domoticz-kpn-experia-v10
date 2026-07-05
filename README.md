@@ -11,8 +11,9 @@ It periodically asks your router who is home, and flips a Domoticz switch for ea
 ## 🚀 Features
 * **Who's home?** Tracks all connected wireless devices (and optionally wired devices) using network topology traversal.
 * **The Big Buttons:** Reboot the router, toggle Global Wi-Fi, or toggle Guest Wi-Fi straight from Domoticz.
-* **Vitals:** Monitors your Internet Connection status and your External IP address.
-* **Speed & Greed:** Keeps track of total data received and sent (Incremental counters in MB).
+* **Vitals:** Monitors Internet status, WAN link status, external IP, router model, software version, serial number, and uptime.
+* **Speed & Greed:** Keeps native Domoticz counters for total data received/sent and sensors for current download/upload speed.
+* **Client diagnostics:** Shows active client count and briefly flags newly discovered devices.
 
 ## 🛠️ Installation
 
