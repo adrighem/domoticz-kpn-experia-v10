@@ -3,7 +3,7 @@
 # Author: Vincent
 #
 """
-<plugin key="ExperiaV10" name="KPN Experia V10 Modem" author="Vincent" version="1.1.0" wikilink="https://github.com/domoticz/domoticz">
+<plugin key="ExperiaV10" name="KPN Experia V10 Modem" author="Vincent" version="1.1.1" wikilink="https://github.com/domoticz/domoticz">
     <description>
         <h2>KPN Experia V10 Modem</h2><br/>
         This plugin tracks connected devices to the KPN Experia V10 modem.
@@ -19,6 +19,16 @@
                 <option label="No" value="False" default="true" />
             </options>
         </param>
+        <param field="Mode2" label="Poll Interval" width="75px" required="true" default="30">
+            <options>
+                <option label="10s" value="10"/>
+                <option label="20s" value="20"/>
+                <option label="30s" value="30"/>
+                <option label="1m" value="60"/>
+                <option label="2m" value="120"/>
+                <option label="5m" value="300"/>
+            </options>
+        </param>
     </params>
 </plugin>
 """
@@ -30,6 +40,7 @@ import json
 import ssl
 import threading
 import time
+import queue
 
 _AUTH_ERROR_CODES = {"196621", "196614"}
 _AUTH_ERROR_TEXT_MARKERS = (
@@ -44,6 +55,7 @@ _OPTIONAL_PERMISSION_DENIED_SERVICES = {
     "NeMo.Intf.eth0",
     "NMC.Wifi",
 }
+_CONTEXT_REFRESH_INTERVAL = 25 * 60
 
 
 class ExperiaV10ApiError(Exception):
@@ -62,14 +74,23 @@ class ExperiaPlugin:
     def __init__(self):
         self.context_id = None
         self.cookie = None
+        self.context_created_at = None
+        self.context_lock = threading.RLock()
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         self.track_wired = False
+        self.poll_interval = 30
+        self.queue = queue.Queue()
         self.stop_event = threading.Event()
         self.poll_thread = None
         self.command_threads = []
         self.last_rx_bytes = None
         self.last_tx_bytes = None
         self.last_traffic_time = None
+        self.last_traffic_info = None
+        self.last_throughput_down = 0.0
+        self.last_throughput_up = 0.0
+        self.last_router_uptime = None
+        self.router_reboot_detected = False
         self.known_macs = None
         self.last_new_device_time = None
         self.last_new_device_info = None
@@ -77,7 +98,8 @@ class ExperiaPlugin:
     def onStart(self):
         Domoticz.Log("onStart called")
         self.track_wired = (Parameters.get("Mode1", "False") == "True")
-        
+        self.poll_interval = int(Parameters.get("Mode2", "30"))
+
         # Start background polling thread
         self.stop_event.clear()
         self.poll_thread = threading.Thread(name="ExperiaV10_PollThread", target=self.poll_loop)
@@ -116,12 +138,67 @@ class ExperiaPlugin:
         Domoticz.Log("Background thread started.")
         while not self.stop_event.is_set():
             try:
-                self.sync_devices()
+                data = self.fetch_all_data()
+                # Queue the Domoticz update to be executed on the main thread
+                self.queue.put(lambda d=data: self.sync_devices(d))
             except Exception as e:
                 Domoticz.Error(f"Error in poll loop: {e}")
-            
-            # Wait 30 seconds between polls, but break early if stop_event is set
-            self.stop_event.wait(30.0)
+
+            # Wait poll_interval seconds between polls, but break early if stop_event is set
+            self.stop_event.wait(self.poll_interval)
+
+    def fetch_all_data(self):
+        """Fetch all data from the router on the background thread."""
+        devices = None
+        try:
+            devices = self.get_devices()
+        except Exception as e:
+            Domoticz.Error(f"Error fetching devices: {e}")
+
+        router_info = None
+        try:
+            router_info = self.get_router_info()
+        except Exception as e:
+            Domoticz.Error(f"Error fetching router info: {e}")
+
+        wifi_on = None
+        try:
+            wifi_on = self.get_wifi_status()
+        except ExperiaV10PermissionDeniedError as e:
+            self._debug(f"Optional Wi-Fi status unavailable: {e}")
+        except Exception as e:
+            Domoticz.Error(f"Error fetching Wi-Fi status: {e}")
+
+        guest_wifi = None
+        try:
+            guest_wifi = self.get_guest_wifi_status()
+        except ExperiaV10PermissionDeniedError as e:
+            self._debug(f"Optional Guest Wi-Fi status unavailable: {e}")
+        except Exception as e:
+            Domoticz.Error(f"Error fetching Guest Wi-Fi status: {e}")
+
+        wan_info = None
+        try:
+            wan_info = self.get_wan_info()
+        except Exception as e:
+            Domoticz.Error(f"Error fetching WAN info: {e}")
+
+        traffic_info = None
+        try:
+            traffic_info = self.get_traffic_info()
+        except ExperiaV10PermissionDeniedError as e:
+            self._debug(f"Optional traffic counters unavailable: {e}")
+        except Exception as e:
+            Domoticz.Error(f"Error fetching Traffic info: {e}")
+
+        return {
+            "devices": devices,
+            "router_info": router_info,
+            "wifi_on": wifi_on,
+            "guest_wifi": guest_wifi,
+            "wan_info": wan_info,
+            "traffic_info": traffic_info,
+        }
 
     def _debug(self, message):
         debug = getattr(Domoticz, "Debug", None)
@@ -129,8 +206,15 @@ class ExperiaPlugin:
             debug(message)
 
     def _clear_context(self):
-        self.context_id = None
-        self.cookie = None
+        with self.context_lock:
+            self.context_id = None
+            self.cookie = None
+            self.context_created_at = None
+
+    def _context_refresh_due(self):
+        if self.context_created_at is None:
+            return False
+        return time.monotonic() - self.context_created_at >= _CONTEXT_REFRESH_INTERVAL
 
     def _ensure_text_device(self, device_id, name):
         if device_id not in Devices or 1 not in Devices[device_id].Units:
@@ -220,7 +304,45 @@ class ExperiaPlugin:
         self.last_rx_bytes = rx_bytes
         self.last_tx_bytes = tx_bytes
         self.last_traffic_time = current_time
+        self.last_throughput_down = throughput_down
+        self.last_throughput_up = throughput_up
         return throughput_down, throughput_up
+
+    def _preserve_transient_router_info(self, router_info):
+        uptime = int(router_info.get("uptime", 0) or 0)
+        previous_uptime = self.last_router_uptime
+        self.router_reboot_detected = (
+            previous_uptime is not None
+            and 0 < uptime < previous_uptime
+        )
+
+        if uptime == 0 and previous_uptime is not None and previous_uptime > 0:
+            self._debug("Ignoring transient zero router uptime during update")
+            router_info = dict(router_info)
+            router_info["uptime"] = previous_uptime
+            self.router_reboot_detected = False
+
+        return router_info
+
+    def _traffic_values(self, traffic_info):
+        return tuple(
+            int(traffic_info.get(key, 0) or 0)
+            for key in ("rx_bytes", "tx_bytes", "rx_packets", "tx_packets")
+        )
+
+    def _preserve_transient_traffic_info(self, traffic_info):
+        if self.last_traffic_info is None or self.router_reboot_detected:
+            return traffic_info, True
+
+        current_counters = self._traffic_values(traffic_info)
+        previous_counters = self._traffic_values(self.last_traffic_info)
+        if all(value == 0 for value in current_counters) and any(
+            value > 0 for value in previous_counters
+        ):
+            self._debug("Ignoring transient zero traffic counters during update")
+            return dict(self.last_traffic_info), False
+
+        return traffic_info, True
 
     def _detect_new_devices(self, devices):
         current_macs = {device["mac"] for device in devices}
@@ -242,47 +364,93 @@ class ExperiaPlugin:
 
         return False
 
-    def sync_devices(self):
-        try:
-            devices = self.get_devices()
-        except Exception as e:
-            Domoticz.Error(f"Error fetching devices: {e}")
-            devices = None
+    def sync_devices(self, data=None):
+        self.router_reboot_detected = False
 
-        if devices is not None:
-            self._sync_tracked_devices(devices)
-            self._sync_client_diagnostics(devices)
+        if data is None:
+            # Synchronous path (mainly for backward compatibility in tests)
+            try:
+                devices = self.get_devices()
+            except Exception as e:
+                Domoticz.Error(f"Error fetching devices: {e}")
+                devices = None
 
-        try:
-            self._sync_router_info()
-        except Exception as e:
-            Domoticz.Error(f"Error fetching router info: {e}")
+            if devices is not None:
+                self._sync_tracked_devices(devices)
+                self._sync_client_diagnostics(devices)
 
-        try:
-            self._sync_wifi_status()
-        except ExperiaV10PermissionDeniedError as e:
-            self._debug(f"Optional Wi-Fi status unavailable: {e}")
-        except Exception as e:
-            Domoticz.Error(f"Error fetching Wi-Fi status: {e}")
+            try:
+                self._sync_router_info()
+            except Exception as e:
+                Domoticz.Error(f"Error fetching router info: {e}")
 
-        try:
-            self._sync_guest_wifi_status()
-        except ExperiaV10PermissionDeniedError as e:
-            self._debug(f"Optional Guest Wi-Fi status unavailable: {e}")
-        except Exception as e:
-            Domoticz.Error(f"Error fetching Guest Wi-Fi status: {e}")
+            try:
+                self._sync_wifi_status()
+            except ExperiaV10PermissionDeniedError as e:
+                self._debug(f"Optional Wi-Fi status unavailable: {e}")
+            except Exception as e:
+                Domoticz.Error(f"Error fetching Wi-Fi status: {e}")
 
-        try:
-            self._sync_wan_info()
-        except Exception as e:
-            Domoticz.Error(f"Error fetching WAN info: {e}")
+            try:
+                self._sync_guest_wifi_status()
+            except ExperiaV10PermissionDeniedError as e:
+                self._debug(f"Optional Guest Wi-Fi status unavailable: {e}")
+            except Exception as e:
+                Domoticz.Error(f"Error fetching Guest Wi-Fi status: {e}")
 
-        try:
-            self._sync_traffic_info()
-        except ExperiaV10PermissionDeniedError as e:
-            self._debug(f"Optional traffic counters unavailable: {e}")
-        except Exception as e:
-            Domoticz.Error(f"Error fetching Traffic info: {e}")
+            try:
+                self._sync_wan_info()
+            except Exception as e:
+                Domoticz.Error(f"Error fetching WAN info: {e}")
+
+            try:
+                self._sync_traffic_info()
+            except ExperiaV10PermissionDeniedError as e:
+                self._debug(f"Optional traffic counters unavailable: {e}")
+            except Exception as e:
+                Domoticz.Error(f"Error fetching Traffic info: {e}")
+        else:
+            # Asynchronous path using pre-fetched data
+            devices = data.get("devices")
+            if devices is not None:
+                self._sync_tracked_devices(devices)
+                self._sync_client_diagnostics(devices)
+
+            router_info = data.get("router_info")
+            if router_info is not None:
+                try:
+                    self._sync_router_info(router_info)
+                except Exception as e:
+                    Domoticz.Error(f"Error syncing router info: {e}")
+
+            wifi_on = data.get("wifi_on")
+            if wifi_on is not None:
+                try:
+                    self._sync_wifi_status(wifi_on)
+                except Exception as e:
+                    Domoticz.Error(f"Error syncing Wi-Fi status: {e}")
+
+            guest_wifi = data.get("guest_wifi")
+            if guest_wifi is not None:
+                try:
+                    guest_on, guest_uid = guest_wifi
+                    self._sync_guest_wifi_status(guest_on, guest_uid)
+                except Exception as e:
+                    Domoticz.Error(f"Error syncing Guest Wi-Fi status: {e}")
+
+            wan_info = data.get("wan_info")
+            if wan_info is not None:
+                try:
+                    self._sync_wan_info(wan_info)
+                except Exception as e:
+                    Domoticz.Error(f"Error syncing WAN info: {e}")
+
+            traffic_info = data.get("traffic_info")
+            if traffic_info is not None:
+                try:
+                    self._sync_traffic_info(traffic_info)
+                except Exception as e:
+                    Domoticz.Error(f"Error syncing Traffic info: {e}")
 
         # Reboot Button creation
         if "REBOOT_MODEM" not in Devices or 1 not in Devices["REBOOT_MODEM"].Units:
@@ -338,8 +506,10 @@ class ExperiaPlugin:
         self._update_switch("NEW_DEVICE", "New Device Detected", new_device_detected)
         self._update_text_device("LAST_NEW_DEVICE", "Last New Device", last_new_device)
 
-    def _sync_router_info(self):
-        router_info = self.get_router_info()
+    def _sync_router_info(self, router_info=None):
+        if router_info is None:
+            router_info = self.get_router_info()
+        router_info = self._preserve_transient_router_info(router_info)
         info_text = (
             f"{router_info['model']} | "
             f"HW {router_info['hardware_version'] or '-'} | "
@@ -352,23 +522,28 @@ class ExperiaPlugin:
         self._update_text_device("ROUTER_SOFTWARE", "Router Software Version", router_info["software_version"])
         self._update_text_device("ROUTER_SERIAL", "Router Serial Number", router_info["serial_number"])
         self._update_custom_sensor("ROUTER_UPTIME", "Uptime", router_info["uptime"], "s")
+        self.last_router_uptime = int(router_info["uptime"] or 0)
 
-    def _sync_wifi_status(self):
-        wifi_on = self.get_wifi_status()
+    def _sync_wifi_status(self, wifi_on=None):
+        if wifi_on is None:
+            wifi_on = self.get_wifi_status()
         self._update_switch("WIFI", "Global Wi-Fi", wifi_on)
 
-    def _sync_guest_wifi_status(self):
-        guest_on, _guest_uid = self.get_guest_wifi_status()
+    def _sync_guest_wifi_status(self, guest_on=None, guest_uid=None):
+        if guest_on is None:
+            guest_on, _guest_uid = self.get_guest_wifi_status()
         self._update_switch("GUEST_WIFI", "Guest Wi-Fi", guest_on)
 
-    def _sync_wan_info(self):
-        wan_info = self.get_wan_info()
+    def _sync_wan_info(self, wan_info=None):
+        if wan_info is None:
+            wan_info = self.get_wan_info()
         self._update_switch("WAN_STATUS", "Internet Connection", wan_info["connected"])
         self._update_text_device("WAN_IP", "External IP", wan_info["external_ip"])
         self._update_text_device("WAN_LINK_STATUS", "WAN Link Status", wan_info["link_status"])
 
-    def _sync_traffic_info(self):
-        traffic_info = self.get_traffic_info()
+    def _sync_traffic_info(self, traffic_info=None):
+        if traffic_info is None:
+            traffic_info = self.get_traffic_info()
 
         # Clean up old Custom Sensor devices if they exist
         for old_dev in ["TRAFFIC_RX_MB", "TRAFFIC_TX_MB", "TRAFFIC_RX_INC", "TRAFFIC_TX_INC", "TRAFFIC_RX", "TRAFFIC_TX"]:
@@ -387,9 +562,16 @@ class ExperiaPlugin:
             Domoticz.Log("Creating Traffic TX Counter")
             Domoticz.Unit(Name="Data Sent (KB)", DeviceID="TRAFFIC_TX", Unit=1, Type=113, Subtype=0, Switchtype=3).Create()
 
+        traffic_info, traffic_info_current = self._preserve_transient_traffic_info(traffic_info)
+
         rx_bytes = traffic_info["rx_bytes"]
         tx_bytes = traffic_info["tx_bytes"]
-        throughput_down, throughput_up = self._calculate_throughput(rx_bytes, tx_bytes)
+        if traffic_info_current:
+            throughput_down, throughput_up = self._calculate_throughput(rx_bytes, tx_bytes)
+            self.last_traffic_info = dict(traffic_info)
+        else:
+            throughput_down = self.last_throughput_down
+            throughput_up = self.last_throughput_up
 
         # Domoticz Counter type expects the absolute total value.
         # Domoticz natively handles counter resets if the new value is lower than the previous one.
@@ -399,8 +581,20 @@ class ExperiaPlugin:
 
         self._update_unit("TRAFFIC_RX", "Data Received (KB)", nValue=0, sValue=str(rx_kb))
         self._update_unit("TRAFFIC_TX", "Data Sent (KB)", nValue=0, sValue=str(tx_kb))
-        self._update_custom_sensor("THROUGHPUT_DOWN", "Download Speed", throughput_down, "B/s")
-        self._update_custom_sensor("THROUGHPUT_UP", "Upload Speed", throughput_up, "B/s")
+
+        # Calculate Mbps values
+        throughput_down_mbps = (throughput_down * 8) / 1000000.0
+        throughput_up_mbps = (throughput_up * 8) / 1000000.0
+
+        # Always update the new Mbps-based custom sensors
+        self._update_custom_sensor("THROUGHPUT_DOWN_MBPS", "Download Speed", throughput_down_mbps, "Mbps")
+        self._update_custom_sensor("THROUGHPUT_UP_MBPS", "Upload Speed", throughput_up_mbps, "Mbps")
+
+        # Gracefully handle the legacy B/s devices if they exist
+        if "THROUGHPUT_DOWN" in Devices:
+            self._update_custom_sensor("THROUGHPUT_DOWN", "Download Speed (Legacy B/s)", throughput_down, "B/s")
+        if "THROUGHPUT_UP" in Devices:
+            self._update_custom_sensor("THROUGHPUT_UP", "Upload Speed (Legacy B/s)", throughput_up, "B/s")
 
     def get_guest_wifi_status(self):
         try:
@@ -580,73 +774,86 @@ class ExperiaPlugin:
         raise ExperiaV10AuthenticationError(error_message)
 
     def _get_context(self):
-        host = Parameters["Address"]
-        username = Parameters["Username"]
-        password = Parameters["Password"]
+        with self.context_lock:
+            if self._context_refresh_due():
+                self._debug("Refreshing router context before session timeout")
+                self._clear_context()
 
-        login_url = f"http://{host}/ws"
-        login_payload = {
-            "service": "sah.Device.Information",
-            "method": "createContext",
-            "parameters": {
-                "applicationName": "webui",
-                "username": username.lower(),
-                "password": password,
-            },
-        }
-        headers = {
-            "Content-Type": "application/x-sah-ws-4-call+json",
-            "Authorization": "X-Sah-Login",
-            "User-Agent": self.user_agent,
-        }
+            if self.context_id and self.cookie is not None:
+                return True
 
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+            host = Parameters["Address"]
+            username = Parameters["Username"]
+            password = Parameters["Password"]
 
-        try:
-            req = self._build_request(login_url, login_payload, headers)
-            resp = urllib.request.urlopen(req, timeout=5, context=ctx)
-            response_info = resp.info()
-            data = self._read_json_response(resp)
-        except urllib.error.HTTPError as e:
-            if e.code != 200:
-                login_url = f"http://{host}/ws/NeMo/Intf/lan:getMIBs"
-                try:
-                    req = self._build_request(login_url, login_payload, headers)
-                    resp = urllib.request.urlopen(req, timeout=5, context=ctx)
-                    response_info = resp.info()
-                    data = self._read_json_response(resp)
-                except Exception as ex:
-                    Domoticz.Error(f"Login failed on fallback: {ex}")
+            login_url = f"http://{host}/ws"
+            login_payload = {
+                "service": "sah.Device.Information",
+                "method": "createContext",
+                "parameters": {
+                    "applicationName": "webui",
+                    "username": username.lower(),
+                    "password": password,
+                },
+            }
+            headers = {
+                "Content-Type": "application/x-sah-ws-4-call+json",
+                "Authorization": "X-Sah-Login",
+                "User-Agent": self.user_agent,
+            }
+
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            try:
+                req = self._build_request(login_url, login_payload, headers)
+                resp = urllib.request.urlopen(req, timeout=5, context=ctx)
+                response_info = resp.info()
+                data = self._read_json_response(resp)
+            except urllib.error.HTTPError as e:
+                if e.code != 200:
+                    login_url = f"http://{host}/ws/NeMo/Intf/lan:getMIBs"
+                    try:
+                        req = self._build_request(login_url, login_payload, headers)
+                        resp = urllib.request.urlopen(req, timeout=5, context=ctx)
+                        response_info = resp.info()
+                        data = self._read_json_response(resp)
+                    except Exception as ex:
+                        Domoticz.Error(f"Login failed on fallback: {ex}")
+                        return False
+                else:
+                    Domoticz.Error(f"Login failed with HTTP error: {e}")
                     return False
-            else:
-                Domoticz.Error(f"Login failed with HTTP error: {e}")
-                return False
-        except Exception as e:
-            Domoticz.Error(f"Login failed: {e}")
-            return False
-
-        try:
-            if "data" in data and "contextID" in data["data"]:
-                self.context_id = data["data"]["contextID"]
-            elif "status" in data and isinstance(data["status"], dict) and "contextID" in data["status"]:
-                self.context_id = data["status"]["contextID"]
-            else:
-                Domoticz.Error(f"Failed to parse contextID. Raw response: {data}")
+            except Exception as e:
+                Domoticz.Error(f"Login failed: {e}")
                 return False
 
-            cookie_header = response_info.get("Set-Cookie", "")
-            self.cookie = cookie_header.split(";")[0] if cookie_header else ""
-            return True
-        except KeyError as err:
-            Domoticz.Error(f"Context key error: {err}")
-            return False
+            try:
+                if "data" in data and "contextID" in data["data"]:
+                    self.context_id = data["data"]["contextID"]
+                elif "status" in data and isinstance(data["status"], dict) and "contextID" in data["status"]:
+                    self.context_id = data["status"]["contextID"]
+                else:
+                    Domoticz.Error(f"Failed to parse contextID. Raw response: {data}")
+                    return False
+
+                cookie_header = response_info.get("Set-Cookie", "")
+                self.cookie = cookie_header.split(";")[0] if cookie_header else ""
+                self.context_created_at = time.monotonic()
+                return True
+            except KeyError as err:
+                Domoticz.Error(f"Context key error: {err}")
+                return False
 
     def _request(self, service, method, parameters=None, endpoint="ws/NeMo/Intf/lan:getMIBs", retry_on_auth_error=True):
-        if not self.context_id or self.cookie is None:
+        if not self.context_id or self.cookie is None or self._context_refresh_due():
             if not self._get_context():
                 raise ExperiaV10AuthenticationError("Router login failed")
+
+        with self.context_lock:
+            context_id = self.context_id
+            cookie = self.cookie
 
         host = Parameters["Address"]
         if endpoint == "ws/NeMo/Intf/lan:getMIBs" and service in ("sah.Device.Information", "DeviceInfo", "sah.Device.WiFi.Radio"):
@@ -660,9 +867,9 @@ class ExperiaPlugin:
         }
         headers = {
             "Content-Type": "application/x-sah-ws-4-call+json",
-            "Authorization": f"X-Sah {self.context_id}",
-            "X-Context": self.context_id,
-            "Cookie": self.cookie,
+            "Authorization": f"X-Sah {context_id}",
+            "X-Context": context_id,
+            "Cookie": cookie,
             "User-Agent": self.user_agent,
         }
 
@@ -831,20 +1038,47 @@ class ExperiaPlugin:
 
         return list(results.values())
 
+    def onHeartbeat(self):
+        self._debug("onHeartbeat called")
+        self.process_queue()
+
+    def process_queue(self):
+        """Process all queued tasks on the main thread."""
+        while not self.queue.empty():
+            try:
+                task = self.queue.get_nowait()
+                task()
+                self.queue.task_done()
+            except queue.Empty:
+                break
+            except Exception as e:
+                Domoticz.Error(f"Error executing queued task on main thread: {e}")
+
+    def _update_command_unit(self, device_id, unit, active):
+        if device_id in Devices and unit in Devices[device_id].Units:
+            ha_unit = Devices[device_id].Units[unit]
+            ha_unit.nValue = 1 if active else 0
+            ha_unit.sValue = "On" if active else "Off"
+            ha_unit.Update(Log=True)
+
+    def _update_reboot_button(self, device_id, unit, active, log=True):
+        if device_id in Devices and unit in Devices[device_id].Units:
+            ha_unit = Devices[device_id].Units[unit]
+            ha_unit.nValue = 1 if active else 0
+            ha_unit.sValue = "On" if active else "Off"
+            ha_unit.Update(Log=log)
+
     def onCommand(self, DeviceID, Unit, Command, Level, Color):
         # Clean up dead threads to prevent list from growing forever
         self.command_threads = [t for t in self.command_threads if t.is_alive()]
-        
+
         if DeviceID == "WIFI" and Unit == 1:
             enable = (Command.lower() == "on")
             Domoticz.Log(f"Setting Wi-Fi to {enable}")
             def set_and_update():
                 try:
                     self.set_wifi_status(enable)
-                    ha_unit = Devices[DeviceID].Units[Unit]
-                    ha_unit.nValue = 1 if enable else 0
-                    ha_unit.sValue = "On" if enable else "Off"
-                    ha_unit.Update(Log=True)
+                    self.queue.put(lambda: self._update_command_unit(DeviceID, Unit, enable))
                 except Exception as e:
                     Domoticz.Error(f"Failed to set Wi-Fi: {e}")
             t = threading.Thread(name="ExperiaV10_SetWifi", target=set_and_update)
@@ -856,10 +1090,7 @@ class ExperiaPlugin:
             def set_and_update_guest():
                 try:
                     self.set_guest_wifi_status(enable)
-                    ha_unit = Devices[DeviceID].Units[Unit]
-                    ha_unit.nValue = 1 if enable else 0
-                    ha_unit.sValue = "On" if enable else "Off"
-                    ha_unit.Update(Log=True)
+                    self.queue.put(lambda: self._update_command_unit(DeviceID, Unit, enable))
                 except Exception as e:
                     Domoticz.Error(f"Failed to set Guest Wi-Fi: {e}")
             t = threading.Thread(name="ExperiaV10_SetGuestWifi", target=set_and_update_guest)
@@ -870,14 +1101,9 @@ class ExperiaPlugin:
             def reboot_modem():
                 try:
                     self._request("NMC", "reboot", {"reason": "WebUI reboot"}, endpoint="ws")
-                    ha_unit = Devices[DeviceID].Units[Unit]
-                    ha_unit.nValue = 1
-                    ha_unit.sValue = "On"
-                    ha_unit.Update(Log=True)
+                    self.queue.put(lambda: self._update_reboot_button(DeviceID, Unit, True, log=True))
                     self.stop_event.wait(1.0)
-                    ha_unit.nValue = 0
-                    ha_unit.sValue = "Off"
-                    ha_unit.Update(Log=False)
+                    self.queue.put(lambda: self._update_reboot_button(DeviceID, Unit, False, log=False))
                 except Exception as e:
                     Domoticz.Error(f"Failed to reboot modem: {e}")
             t = threading.Thread(name="ExperiaV10_Reboot", target=reboot_modem)
@@ -910,3 +1136,7 @@ def onNotification(Name, Subject, Text, Status, Priority, Sound, ImageFile):
 
 def onDisconnect(Connection):
     pass
+
+def onHeartbeat():
+    global _plugin
+    _plugin.onHeartbeat()
