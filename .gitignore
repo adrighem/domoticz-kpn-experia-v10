@@ -18,6 +18,7 @@ ENV/
 # Distribution / packaging
 dist/
 build/
+releases/
 *.egg-info/
 
 # Domoticz specific
