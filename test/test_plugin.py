@@ -632,6 +632,325 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin.onHeartbeat()
         self.assertEqual(plugin.sync_devices.call_count, 1)
 
+    def test_parse_devices_classification(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        raw_devices = [
+            # A non-dict element to verify robustness
+            "not-a-dict",
+            # Active Wi-Fi device using Tags
+            {
+                "PhysAddress": "aa:bb:cc:dd:ee:11",
+                "Name": "My iPhone",
+                "IPAddress": "192.168.42.50",
+                "Active": True,
+                "Tags": "lan edev mac physical wifi ipv4",
+                "InterfaceName": "wl0.1",
+            },
+            # Inactive Wi-Fi device using InterfaceName
+            {
+                "PhysAddress": "AA:BB:CC:DD:EE:22",
+                "Key": "Laptop-Key",
+                "IPAddress": "192.168.42.51",
+                "Active": False,
+                "Tags": "lan edev mac physical",
+                "InterfaceName": "wl1",
+            },
+            # Active Wired device using Tags and InterfaceName
+            {
+                "PhysAddress": "11:22:33:44:55:66",
+                "IPAddress": "192.168.42.100",
+                "Active": True,
+                "Tags": "lan edev mac physical eth ipv4",
+                "InterfaceName": "eth0",
+            },
+            # Record missing PhysAddress
+            {
+                "Name": "Ghost Device",
+                "IPAddress": "192.168.42.200",
+                "Active": True,
+            }
+        ]
+
+        # Scenario A: track_wired = False (wired device should be excluded)
+        results = {}
+        plugin._parse_devices(raw_devices, track_wired_devices=False, results=results)
+        
+        self.assertIn("AA:BB:CC:DD:EE:11", results)
+        self.assertEqual(results["AA:BB:CC:DD:EE:11"]["name"], "My iPhone")
+        self.assertEqual(results["AA:BB:CC:DD:EE:11"]["ip"], "192.168.42.50")
+        self.assertTrue(results["AA:BB:CC:DD:EE:11"]["active"])
+
+        self.assertIn("AA:BB:CC:DD:EE:22", results)
+        self.assertEqual(results["AA:BB:CC:DD:EE:22"]["name"], "Laptop-Key")  # Key fallback
+        self.assertEqual(results["AA:BB:CC:DD:EE:22"]["ip"], "192.168.42.51")
+        self.assertFalse(results["AA:BB:CC:DD:EE:22"]["active"])
+
+        # Wired device should NOT be present
+        self.assertNotIn("11:22:33:44:55:66", results)
+
+        # Scenario B: track_wired = True (wired device should be included)
+        results_with_wired = {}
+        plugin._parse_devices(raw_devices, track_wired_devices=True, results=results_with_wired)
+        self.assertIn("11:22:33:44:55:66", results_with_wired)
+        self.assertEqual(results_with_wired["11:22:33:44:55:66"]["name"], "11:22:33:44:55:66")  # MAC fallback
+        self.assertEqual(results_with_wired["11:22:33:44:55:66"]["ip"], "192.168.42.100")
+        self.assertTrue(results_with_wired["11:22:33:44:55:66"]["active"])
+
+    def test_parse_topology_recursive(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        nested_topology = [
+            {
+                "Key": "bridge-node",
+                "Tags": "self lan mac nemo bridge",
+                "Active": True,
+                "Children": [
+                    # A wireless vap (has no MAC address of its own but children inherit wifi)
+                    {
+                        "Key": "wireless-vap",
+                        "Tags": "self lan vap wifi nemo",
+                        "Active": True,
+                        "Children": [
+                            # Device under vap (wireless child)
+                            {
+                                "PhysAddress": "aa:bb:cc:dd:ee:33",
+                                "Name": "Wireless-Child",
+                                "IPAddress": "192.168.42.10",
+                                "Active": True,
+                                "Tags": "lan edev mac physical",
+                            }
+                        ]
+                    },
+                    # A wired child on the lan bridge
+                    {
+                        "PhysAddress": "aa:bb:cc:dd:ee:44",
+                        "Name": "Wired-Child",
+                        "IPAddress": "192.168.42.20",
+                        "Active": True,
+                        "Tags": "lan edev mac physical eth",
+                        "InterfaceName": "eth1",
+                    }
+                ]
+            }
+        ]
+
+        # Scenario A: track_wired = False
+        results = {}
+        plugin._parse_topology(nested_topology, track_wired_devices=False, results=results)
+        
+        # Wireless child should be parsed successfully (inherits parent_is_wifi=True)
+        self.assertIn("AA:BB:CC:DD:EE:33", results)
+        self.assertEqual(results["AA:BB:CC:DD:EE:33"]["name"], "Wireless-Child")
+        
+        # Wired child should be excluded
+        self.assertNotIn("AA:BB:CC:DD:EE:44", results)
+
+        # Scenario B: track_wired = True
+        results_all = {}
+        plugin._parse_topology(nested_topology, track_wired_devices=True, results=results_all)
+        self.assertIn("AA:BB:CC:DD:EE:33", results_all)
+        self.assertIn("AA:BB:CC:DD:EE:44", results_all)
+        self.assertEqual(results_all["AA:BB:CC:DD:EE:44"]["name"], "Wired-Child")
+
+    def test_get_devices_api_fallbacks(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin.track_wired = False
+
+        # Scenario A: Flat query succeeds and returns devices
+        responses_flat_ok = [
+            {"status": [{"PhysAddress": "aa:bb:cc:dd:ee:11", "Active": True, "Tags": "wifi"}]},
+            {"status": []},  # Second flat query (inactive)
+        ]
+        with patch.object(plugin, "_request", side_effect=responses_flat_ok) as mock_request:
+            devices = plugin.get_devices()
+            self.assertEqual(len(devices), 1)
+            self.assertEqual(devices[0]["mac"], "AA:BB:CC:DD:EE:11")
+            self.assertEqual(mock_request.call_count, 2)
+
+        # Scenario B: Flat query returns empty list. Fallback to LAN and guest topology.
+        responses_fallback = [
+            {"status": []},  # First flat query (active)
+            {"status": []},  # Second flat query (inactive)
+            # LAN Topology response containing a wifi device
+            {
+                "status": [
+                    {
+                        "PhysAddress": "aa:bb:cc:dd:ee:22",
+                        "Active": True,
+                        "Tags": "wifi",
+                    }
+                ]
+            },
+            # Guest Topology response empty
+            {"status": []},
+        ]
+        with patch.object(plugin, "_request", side_effect=responses_fallback) as mock_request:
+            devices = plugin.get_devices()
+            self.assertEqual(len(devices), 1)
+            self.assertEqual(devices[0]["mac"], "AA:BB:CC:DD:EE:22")
+            # 2 flat queries + 2 fallback queries
+            self.assertEqual(mock_request.call_count, 4)
+
+        # Scenario C: Queries completely fail. It should raise the final Exception.
+        responses_fail = [
+            module.ExperiaV10ApiError("Flat query 1 failed"),
+            module.ExperiaV10ApiError("Flat query 2 failed"),
+            module.ExperiaV10ApiError("LAN topology failed"),
+            module.ExperiaV10ApiError("Guest topology failed"),
+        ]
+        with patch.object(plugin, "_request", side_effect=responses_fail) as mock_request:
+            with self.assertRaises(module.ExperiaV10ApiError) as context:
+                plugin.get_devices()
+            self.assertIn("Guest topology failed", str(context.exception))
+            self.assertEqual(mock_request.call_count, 4)
+
+    def test_get_router_info_all_paths(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        # Path 1: Primary query succeeds
+        with patch.object(plugin, "_request", return_value={"status": {"ModelName": "H369A", "UpTime": 1000}}) as mock_request:
+            info = plugin.get_router_info()
+            self.assertEqual(info["model"], "H369A")
+            self.assertEqual(info["uptime"], 1000)
+            mock_request.assert_called_once_with("DeviceInfo", "get", endpoint="ws")
+
+        # Path 2: Primary returns none/empty, falls back to Nemo query
+        responses_nemo = [
+            {"status": {}},  # DeviceInfo empty
+            {"status": [{"ProductClass": "v10", "UpTime": 2000}]}  # Nemo fallback list
+        ]
+        with patch.object(plugin, "_request", side_effect=responses_nemo) as mock_request:
+            info = plugin.get_router_info()
+            self.assertEqual(info["model"], "v10")
+            self.assertEqual(info["uptime"], 2000)
+            self.assertEqual(mock_request.call_count, 2)
+
+        # Path 3: Primary returns 0 uptime, falls back to NMC query
+        responses_nmc = [
+            {"status": {"ModelName": "H369A", "UpTime": 0}},  # DeviceInfo returns 0 uptime
+            {"status": {"UpTime": 3000}}  # NMC query for uptime
+        ]
+        with patch.object(plugin, "_request", side_effect=responses_nmc) as mock_request:
+            info = plugin.get_router_info()
+            self.assertEqual(info["model"], "H369A")
+            self.assertEqual(info["uptime"], 3000)
+            self.assertEqual(mock_request.call_count, 2)
+
+    def test_get_wan_info(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        # Success case
+        with patch.object(plugin, "_request", return_value={"status": True, "data": {"IPAddress": "8.8.8.8", "LinkState": "up"}}) as mock_request:
+            wan = plugin.get_wan_info()
+            self.assertEqual(wan["external_ip"], "8.8.8.8")
+            self.assertTrue(wan["connected"])
+            self.assertEqual(wan["link_status"], "up")
+
+        # Failure/offline case
+        with patch.object(plugin, "_request", return_value={"status": False}) as mock_request:
+            wan = plugin.get_wan_info()
+            self.assertEqual(wan["external_ip"], "")
+            self.assertFalse(wan["connected"])
+            self.assertEqual(wan["link_status"], "Down")
+
+    def test_get_traffic_info(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        with patch.object(plugin, "_request", return_value={"status": {"RxBytes": 100, "TxBytes": 200, "RxPackets": 10, "TxPackets": 20}}):
+            traffic = plugin.get_traffic_info()
+            self.assertEqual(traffic["rx_bytes"], 100)
+            self.assertEqual(traffic["tx_bytes"], 200)
+            self.assertEqual(traffic["rx_packets"], 10)
+            self.assertEqual(traffic["tx_packets"], 20)
+
+    def test_get_wifi_status_and_set_wifi_status(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        # get_wifi_status wifi on
+        with patch.object(plugin, "_request", return_value={"status": {"DisableLocalWiFi": False}}):
+            self.assertTrue(plugin.get_wifi_status())
+
+        # get_wifi_status wifi off
+        with patch.object(plugin, "_request", return_value={"status": {"DisableLocalWiFi": True}}):
+            self.assertFalse(plugin.get_wifi_status())
+
+        # set_wifi_status
+        with patch.object(plugin, "_request", return_value={}) as mock_request:
+            plugin.set_wifi_status(True)
+            self.assertEqual(mock_request.call_count, 5)
+
+    def test_fetch_all_data_all_exceptions(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        plugin.get_devices = Mock(side_effect=Exception("devices failed"))
+        plugin.get_router_info = Mock(side_effect=Exception("router failed"))
+        plugin.get_wifi_status = Mock(side_effect=module.ExperiaV10PermissionDeniedError("wifi perm denied"))
+        plugin.get_guest_wifi_status = Mock(side_effect=module.ExperiaV10PermissionDeniedError("guest perm denied"))
+        plugin.get_wan_info = Mock(side_effect=Exception("wan failed"))
+        plugin.get_traffic_info = Mock(side_effect=module.ExperiaV10PermissionDeniedError("traffic perm denied"))
+
+        data = plugin.fetch_all_data()
+        self.assertIsNone(data["devices"])
+        self.assertIsNone(data["router_info"])
+        self.assertIsNone(data["wifi_on"])
+        self.assertIsNone(data["guest_wifi"])
+        self.assertIsNone(data["wan_info"])
+        self.assertIsNone(data["traffic_info"])
+
+    def test_sync_devices_synchronous(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        plugin.get_devices = Mock(return_value=[])
+        plugin.get_router_info = Mock(return_value={"model": "M", "hardware_version": "H", "software_version": "S", "serial_number": "SN", "uptime": 100})
+        plugin.get_wifi_status = Mock(return_value=True)
+        plugin.get_guest_wifi_status = Mock(return_value=(False, None))
+        plugin.get_wan_info = Mock(return_value={"external_ip": "1.1.1.1", "connected": True, "link_status": "up"})
+        plugin.get_traffic_info = Mock(return_value={"rx_bytes": 0, "tx_bytes": 0, "rx_packets": 0, "tx_packets": 0})
+
+        # Test successful sync_devices(None)
+        plugin.sync_devices(data=None)
+        self.assertIn("CLIENT_COUNT", module.Devices)
+
+        # Test sync_devices(None) with exceptions to cover catch-all branches
+        plugin.get_devices = Mock(side_effect=Exception("devices err"))
+        plugin.get_router_info = Mock(side_effect=Exception("router err"))
+        plugin.get_wifi_status = Mock(side_effect=module.ExperiaV10PermissionDeniedError("wifi perm err"))
+        plugin.get_guest_wifi_status = Mock(side_effect=module.ExperiaV10PermissionDeniedError("guest perm err"))
+        plugin.get_wan_info = Mock(side_effect=Exception("wan err"))
+        plugin.get_traffic_info = Mock(side_effect=module.ExperiaV10PermissionDeniedError("traffic perm err"))
+
+        plugin.sync_devices(data=None)  # Should not raise exception
+
+    def test_sync_devices_asynchronous_exceptions(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        plugin._sync_router_info = Mock(side_effect=Exception("router info sync err"))
+        plugin._sync_wifi_status = Mock(side_effect=Exception("wifi sync err"))
+        plugin._sync_guest_wifi_status = Mock(side_effect=Exception("guest wifi sync err"))
+        plugin._sync_wan_info = Mock(side_effect=Exception("wan sync err"))
+        plugin._sync_traffic_info = Mock(side_effect=Exception("traffic sync err"))
+
+        data = {
+            "devices": [],
+            "router_info": {},
+            "wifi_on": True,
+            "guest_wifi": (False, None),
+            "wan_info": {},
+            "traffic_info": {}
+        }
+        plugin.sync_devices(data=data) # Should run completely and catch all exceptions
+
 
 if __name__ == "__main__":
     unittest.main()
