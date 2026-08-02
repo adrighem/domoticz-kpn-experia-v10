@@ -3,7 +3,7 @@
 # Author: Vincent
 #
 """
-<plugin key="ExperiaV10" name="KPN Experia V10 Modem" author="Vincent" version="1.1.1" wikilink="https://github.com/domoticz/domoticz">
+<plugin key="ExperiaV10" name="KPN Experia V10 Modem" author="Vincent" version="1.1.2" wikilink="https://github.com/domoticz/domoticz">
     <description>
         <h2>KPN Experia V10 Modem</h2><br/>
         This plugin tracks connected devices to the KPN Experia V10 modem.
