@@ -582,6 +582,15 @@ class ExperiaPluginTests(unittest.TestCase):
         self.assertEqual(plugin.poll_interval, 60)
         plugin.onStop()
 
+    def test_empty_poll_interval_uses_default(self):
+        module, _domoticz = load_plugin()
+        module.Parameters["Mode2"] = ""
+        plugin = module.ExperiaPlugin()
+        plugin.fetch_all_data = Mock(return_value={})
+        plugin.onStart()
+        self.assertEqual(plugin.poll_interval, 30)
+        plugin.onStop()
+
     def test_on_heartbeat_processes_queue(self):
         module, _domoticz = load_plugin()
         plugin = module.ExperiaPlugin()

@@ -98,7 +98,7 @@ class ExperiaPlugin:
     def onStart(self):
         Domoticz.Log("onStart called")
         self.track_wired = (Parameters.get("Mode1", "False") == "True")
-        self.poll_interval = int(Parameters.get("Mode2", "30"))
+        self.poll_interval = int(Parameters.get("Mode2") or "30")
 
         # Start background polling thread
         self.stop_event.clear()
