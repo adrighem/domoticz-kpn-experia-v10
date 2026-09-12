@@ -70,6 +70,9 @@ class ExperiaV10PermissionDeniedError(ExperiaV10ApiError):
     """Raised when the router denies access to a specific API endpoint."""
 
 
+ExperiaRouterApiError = ExperiaV10ApiError
+
+
 class ExperiaPlugin:
     def __init__(self):
         self.context_id = None
@@ -109,7 +112,7 @@ class ExperiaPlugin:
         Domoticz.Log("onStop called")
         # Signal all background threads to stop
         self.stop_event.set()
-        
+
         # Wait for polling thread to exit
         if self.poll_thread and self.poll_thread.is_alive():
             Domoticz.Log("Waiting for background polling thread to exit...")
@@ -463,30 +466,30 @@ class ExperiaPlugin:
             name = dev["name"]
             ip = dev["ip"]
             active = dev["active"]
-            
+
             device_id = mac
             unit = 1
-            
+
             if device_id not in Devices or unit not in Devices[device_id].Units:
                 Domoticz.Log(f"Creating device for {name} ({mac}) at IP {ip}")
                 Domoticz.Unit(Name=name, DeviceID=device_id, Unit=unit, TypeName="Switch").Create()
-                    
+
             if device_id in Devices and unit in Devices[device_id].Units:
                 nValue = 1 if active else 0
                 sValue = "On" if active else "Off"
                 ha_unit = Devices[device_id].Units[unit]
-                
+
                 needs_update = False
                 update_props = False
-                
+
                 if ha_unit.nValue != nValue or ha_unit.sValue != sValue:
                     needs_update = True
-                    
+
                 if ha_unit.Name != name:
                     needs_update = True
                     update_props = True
                     Domoticz.Log(f"Device name changed from '{ha_unit.Name}' to '{name}'")
-                    
+
                 if needs_update:
                     Domoticz.Log(f"Updating device {name} ({mac}) to {sValue}")
                     ha_unit.nValue = nValue
@@ -948,7 +951,7 @@ class ExperiaPlugin:
         for d in status_list:
             if not isinstance(d, dict):
                 continue
-            
+
             mac = d.get("PhysAddress")
             if not mac:
                 continue
@@ -956,7 +959,7 @@ class ExperiaPlugin:
             active = bool(d.get("Active", False))
             tags = str(d.get("Tags", "")).lower().split()
             inf = str(d.get("InterfaceName", d.get("Layer2Interface", ""))).lower()
-            
+
             is_wifi = parent_is_wifi or "wifi" in tags or "ssw_sta" in tags or "wl0" in inf or "wl1" in inf
             is_wired = not is_wifi and ("eth" in tags or "lan" in tags or "eth" in inf)
 
@@ -975,7 +978,7 @@ class ExperiaPlugin:
             tags = str(node.get("Tags", "")).lower().split()
             inf = str(node.get("InterfaceName", node.get("Layer2Interface", ""))).lower()
             is_wifi = parent_is_wifi or "wifi" in tags or "ssw_sta" in tags or "wl0" in inf or "wl1" in inf
-            
+
             mac = node.get("PhysAddress")
             if mac:
                 is_wired = not is_wifi and ("eth" in tags or "lan" in tags or "eth" in inf)
@@ -987,7 +990,7 @@ class ExperiaPlugin:
                     "ip": str(node.get("IPAddress", "")),
                     "active": bool(node.get("Active", False))
                 }
-            
+
             children = node.get("Children")
             if isinstance(children, list):
                 self._parse_topology(children, track_wired_devices, results, parent_is_wifi=is_wifi)
@@ -1110,6 +1113,59 @@ class ExperiaPlugin:
             self.command_threads.append(t)
             t.start()
 
+    def onDeviceModified(self, DeviceID, Unit):
+        # Clean up dead threads
+        self.command_threads = [t for t in self.command_threads if t.is_alive()]
+
+        if DeviceID not in Devices or Unit not in Devices[DeviceID].Units:
+            return
+
+        ha_unit = Devices[DeviceID].Units[Unit]
+
+        special_devices = {
+            "WIFI",
+            "GUEST_WIFI",
+            "WAN_STATUS",
+            "WAN_IP",
+            "WAN_LINK_STATUS",
+            "TRAFFIC_RX",
+            "TRAFFIC_TX",
+            "THROUGHPUT_DOWN",
+            "THROUGHPUT_UP",
+            "CLIENT_COUNT",
+            "NEW_DEVICE",
+            "LAST_NEW_DEVICE",
+            "ROUTER_INFO",
+            "ROUTER_MODEL",
+            "ROUTER_SOFTWARE",
+            "ROUTER_SERIAL",
+            "ROUTER_UPTIME",
+            "REBOOT_MODEM",
+        }
+        if DeviceID in special_devices:
+            return
+
+        new_name = ha_unit.Name
+        mac = DeviceID
+
+        def update_router_name():
+            try:
+                service = f"Devices.Device.{mac}"
+                current_data = self._request(service, "get", {"flags": "full_links"}, endpoint="ws")
+                current_name = None
+                if isinstance(current_data, dict) and "status" in current_data and isinstance(current_data["status"], dict):
+                    current_name = current_data["status"].get("Name")
+
+                if current_name != new_name:
+                    Domoticz.Log(f"Pushing name change for {mac} to Experia Box: '{new_name}'")
+                    self._request(service, "setName", {"name": new_name}, endpoint="ws")
+            except Exception as e:
+                Domoticz.Error(f"Failed to update device name on router: {e}")
+
+        t = threading.Thread(name=f"ExperiaV10_Rename_{mac}", target=update_router_name)
+        self.command_threads.append(t)
+        t.start()
+
 global _plugin
 _plugin = ExperiaPlugin()
 
@@ -1130,6 +1186,10 @@ def onMessage(Connection, Data):
 def onCommand(DeviceID, Unit, Command, Level, Color):
     global _plugin
     _plugin.onCommand(DeviceID, Unit, Command, Level, Color)
+
+def onDeviceModified(DeviceID, Unit):
+    global _plugin
+    _plugin.onDeviceModified(DeviceID, Unit)
 
 def onNotification(Name, Subject, Text, Status, Priority, Sound, ImageFile):
     pass

@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
 
 # IDE / Editor
 .vscode/
@@ -24,3 +25,10 @@ releases/
 # Domoticz specific
 *.db
 *.log
+
+# Local router diagnostics
+inspect_api.py
+test_api.py
+parse_devices.py
+fix_traffic.py
+leases.txt

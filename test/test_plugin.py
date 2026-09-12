@@ -685,7 +685,7 @@ class ExperiaPluginTests(unittest.TestCase):
         # Scenario A: track_wired = False (wired device should be excluded)
         results = {}
         plugin._parse_devices(raw_devices, track_wired_devices=False, results=results)
-        
+
         self.assertIn("AA:BB:CC:DD:EE:11", results)
         self.assertEqual(results["AA:BB:CC:DD:EE:11"]["name"], "My iPhone")
         self.assertEqual(results["AA:BB:CC:DD:EE:11"]["ip"], "192.168.42.50")
@@ -749,11 +749,11 @@ class ExperiaPluginTests(unittest.TestCase):
         # Scenario A: track_wired = False
         results = {}
         plugin._parse_topology(nested_topology, track_wired_devices=False, results=results)
-        
+
         # Wireless child should be parsed successfully (inherits parent_is_wifi=True)
         self.assertIn("AA:BB:CC:DD:EE:33", results)
         self.assertEqual(results["AA:BB:CC:DD:EE:33"]["name"], "Wireless-Child")
-        
+
         # Wired child should be excluded
         self.assertNotIn("AA:BB:CC:DD:EE:44", results)
 
@@ -959,6 +959,114 @@ class ExperiaPluginTests(unittest.TestCase):
             "traffic_info": {}
         }
         plugin.sync_devices(data=data) # Should run completely and catch all exceptions
+
+    def test_on_device_modified_ignores_special_devices(self):
+        module, _domoticz = load_plugin()
+        module.Domoticz.Unit(Name="Global Wi-Fi", DeviceID="WIFI", Unit=1, TypeName="Switch").Create()
+
+        plugin = module.ExperiaPlugin()
+        plugin._request = Mock()
+
+        plugin.onDeviceModified("WIFI", 1)
+        self.assertEqual(len(plugin.command_threads), 0)
+        plugin._request.assert_not_called()
+
+    def test_on_device_modified_pushes_name_change_to_router(self):
+        module, _domoticz = load_plugin()
+        mac = "AA:BB:CC:DD:EE:FF"
+        module.Domoticz.Unit(Name="Phone New", DeviceID=mac, Unit=1, TypeName="Switch").Create()
+
+        plugin = module.ExperiaPlugin()
+        calls = []
+
+        def fake_request(service, method, parameters=None, endpoint=None, **kwargs):
+            calls.append((service, method, parameters))
+            if method == "get":
+                return {"status": {"Name": "Phone Old"}}
+            return {"status": True}
+
+        plugin._request = fake_request
+        plugin.onDeviceModified(mac, 1)
+
+        for thread in plugin.command_threads:
+            thread.join(timeout=2)
+
+        self.assertEqual(
+            calls,
+            [
+                (f"Devices.Device.{mac}", "get", {"flags": "full_links"}),
+                (f"Devices.Device.{mac}", "setName", {"name": "Phone New"}),
+            ],
+        )
+
+    def test_on_device_modified_ignores_matching_name(self):
+        module, _domoticz = load_plugin()
+        mac = "AA:BB:CC:DD:EE:FF"
+        module.Domoticz.Unit(Name="Phone Same", DeviceID=mac, Unit=1, TypeName="Switch").Create()
+
+        plugin = module.ExperiaPlugin()
+        calls = []
+
+        def fake_request(service, method, parameters=None, endpoint=None, **kwargs):
+            calls.append((service, method, parameters))
+            return {"status": {"Name": "Phone Same"}}
+
+        plugin._request = fake_request
+        plugin.onDeviceModified(mac, 1)
+
+        for thread in plugin.command_threads:
+            thread.join(timeout=2)
+
+        self.assertEqual(
+            calls,
+            [
+                (f"Devices.Device.{mac}", "get", {"flags": "full_links"}),
+            ],
+        )
+
+    def test_get_devices_raises_when_all_discovery_endpoints_fail(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin._request = Mock(side_effect=module.ExperiaV10ApiError("API failure"))
+
+        with self.assertRaises(module.ExperiaV10ApiError):
+            plugin.get_devices()
+
+    def test_get_devices_returns_empty_list_for_successful_empty_discovery(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin._request = Mock(return_value={"status": []})
+
+        self.assertEqual(plugin.get_devices(), [])
+
+    def test_get_devices_keeps_successful_partial_results(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        responses = [
+            {
+                "status": [
+                    {
+                        "PhysAddress": "AA:BB:CC:DD:EE:FF",
+                        "Name": "Phone",
+                        "IPAddress": "192.168.2.10",
+                        "Active": True,
+                        "Tags": "wifi",
+                    }
+                ]
+            },
+            module.ExperiaV10ApiError("second query failed"),
+        ]
+
+        def fake_request(*args, **kwargs):
+            item = responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        plugin._request = fake_request
+        devices = plugin.get_devices()
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0]["mac"], "AA:BB:CC:DD:EE:FF")
 
 
 if __name__ == "__main__":
