@@ -10,6 +10,7 @@ It periodically asks your router who is home, and flips a Domoticz switch for ea
 
 ## 🚀 Features
 * **Who's home?** Tracks all connected wireless devices (and optionally wired devices) using network topology traversal.
+* **Parental control:** Monitors device internet access schedules and lets you block or unblock internet access for individual devices with a dedicated switch.
 * **The Big Buttons:** Reboot the router, toggle Global Wi-Fi, or toggle Guest Wi-Fi straight from Domoticz.
 * **Vitals:** Monitors Internet status, WAN link status, external IP, router model, software version, serial number, and uptime.
 * **Speed & Greed:** Keeps native Domoticz counters for total data received/sent and sensors for current download/upload speed.
