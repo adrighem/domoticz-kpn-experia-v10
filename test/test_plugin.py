@@ -17,8 +17,12 @@ class FakeUnit:
         self.DeviceID = kwargs.get("DeviceID")
         self.Unit = kwargs.get("Unit", 1)
         self.Type = kwargs.get("Type", 0)
-        self.Subtype = kwargs.get("Subtype", 0)
-        self.Switchtype = kwargs.get("Switchtype", 0)
+        self.Switchtype = kwargs.get("Switchtype", kwargs.get("SwitchType", 0))
+        if kwargs.get("TypeName") == "Contact":
+            self.Switchtype = 2
+        elif kwargs.get("TypeName") == "Switch":
+            self.Switchtype = 0
+        self.SwitchType = self.Switchtype
         self.TypeName = kwargs.get("TypeName")
         self.Options = kwargs.get("Options", {})
         self.nValue = 0
@@ -28,6 +32,14 @@ class FakeUnit:
 
     def Update(self, **kwargs):
         self.updates.append(kwargs)
+        if "TypeName" in kwargs:
+            self.TypeName = kwargs["TypeName"]
+            if kwargs["TypeName"] == "Contact":
+                self.Switchtype = 2
+                self.SwitchType = 2
+            elif kwargs["TypeName"] == "Switch":
+                self.Switchtype = 0
+                self.SwitchType = 0
 
     def Delete(self):
         self.deleted = True
@@ -378,6 +390,7 @@ class ExperiaPluginTests(unittest.TestCase):
                 "tx_packets": 2,
             }
         )
+        plugin.get_parental_control_schedules = Mock(return_value={})
 
         with patch.object(module.time, "monotonic", return_value=100.0):
             plugin.sync_devices()
@@ -539,6 +552,7 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin.get_traffic_info = Mock(
             side_effect=module.ExperiaV10PermissionDeniedError("denied")
         )
+        plugin.get_parental_control_schedules = Mock(return_value={})
 
         plugin.sync_devices()
 
@@ -561,6 +575,7 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin.get_traffic_info = Mock(return_value={
             "rx_bytes": 4096, "tx_bytes": 2048, "rx_packets": 4, "tx_packets": 2
         })
+        plugin.get_parental_control_schedules = Mock(return_value={})
 
         plugin.sync_devices()
 
@@ -590,6 +605,78 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin.onStart()
         self.assertEqual(plugin.poll_interval, 30)
         plugin.onStop()
+
+    def test_parental_control_toggle_parameter(self):
+        module, _domoticz = load_plugin()
+        # Default is True
+        plugin = module.ExperiaPlugin()
+        plugin.fetch_all_data = Mock(return_value={})
+        plugin.onStart()
+        self.assertTrue(plugin.enable_parental_control)
+        plugin.onStop()
+
+        # Explicit True
+        module.Parameters["Mode3"] = "True"
+        plugin = module.ExperiaPlugin()
+        plugin.fetch_all_data = Mock(return_value={})
+        plugin.onStart()
+        self.assertTrue(plugin.enable_parental_control)
+        plugin.onStop()
+
+        # Explicit False
+        module.Parameters["Mode3"] = "False"
+        plugin = module.ExperiaPlugin()
+        plugin.fetch_all_data = Mock(return_value={})
+        plugin.onStart()
+        self.assertFalse(plugin.enable_parental_control)
+        plugin.onStop()
+
+    def test_parental_control_disabled_behavior(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin.enable_parental_control = False
+
+        # 1. fetch_all_data does not query parental schedules
+        with patch.object(plugin, "get_parental_control_schedules") as mock_pc:
+            plugin.get_devices = Mock(return_value=[])
+            plugin.get_router_info = Mock(return_value={})
+            plugin.get_wifi_status = Mock(return_value=True)
+            plugin.get_guest_wifi_status = Mock(return_value=(False, None))
+            plugin.get_wan_info = Mock(return_value={})
+            plugin.get_traffic_info = Mock(return_value={})
+            data = plugin.fetch_all_data()
+            mock_pc.assert_not_called()
+            self.assertIsNone(data["parental_schedules"])
+
+        # 2. sync_devices does not query parental schedules
+        with patch.object(plugin, "get_parental_control_schedules") as mock_pc:
+            plugin.get_devices = Mock(return_value=[])
+            plugin.get_router_info = Mock(return_value={"model": "M", "hardware_version": "H", "software_version": "S", "serial_number": "SN", "uptime": 100})
+            plugin.get_wifi_status = Mock(return_value=True)
+            plugin.get_guest_wifi_status = Mock(return_value=(False, None))
+            plugin.get_wan_info = Mock(return_value={})
+            plugin.get_traffic_info = Mock(return_value={})
+            plugin.sync_devices(data=None)
+            mock_pc.assert_not_called()
+
+        # 3. _sync_tracked_devices does not create Unit 2
+        devices = [{"mac": "AA:BB:CC:DD:EE:01", "name": "Phone", "ip": "192.168.2.10", "active": True}]
+        plugin._sync_tracked_devices(devices, parental_schedules=None)
+        devs = module.Devices
+        self.assertIn(1, devs["AA:BB:CC:DD:EE:01"].Units)
+        self.assertNotIn(2, devs["AA:BB:CC:DD:EE:01"].Units)
+
+        # 4. onCommand for Unit 2 is ignored
+        with patch.object(plugin, "set_parental_control") as mock_set:
+            plugin.onCommand("AA:BB:CC:DD:EE:01", 2, "On", 0, "")
+            mock_set.assert_not_called()
+
+        # 5. onDeviceModified for Unit 1 does not touch Unit 2 if it existed
+        module.Domoticz.Unit(Name="Old Unit 2", DeviceID="AA:BB:CC:DD:EE:01", Unit=2, TypeName="Switch").Create()
+        devs["AA:BB:CC:DD:EE:01"].Units[1].Name = "New Phone Name"
+        with patch.object(plugin, "_request"):
+            plugin.onDeviceModified("AA:BB:CC:DD:EE:01", 1)
+        self.assertEqual(devs["AA:BB:CC:DD:EE:01"].Units[2].Name, "Old Unit 2")
 
     def test_on_heartbeat_processes_queue(self):
         module, _domoticz = load_plugin()
@@ -906,6 +993,7 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin.get_guest_wifi_status = Mock(side_effect=module.ExperiaV10PermissionDeniedError("guest perm denied"))
         plugin.get_wan_info = Mock(side_effect=Exception("wan failed"))
         plugin.get_traffic_info = Mock(side_effect=module.ExperiaV10PermissionDeniedError("traffic perm denied"))
+        plugin.get_parental_control_schedules = Mock(side_effect=module.ExperiaV10PermissionDeniedError("parental perm denied"))
 
         data = plugin.fetch_all_data()
         self.assertIsNone(data["devices"])
@@ -914,6 +1002,7 @@ class ExperiaPluginTests(unittest.TestCase):
         self.assertIsNone(data["guest_wifi"])
         self.assertIsNone(data["wan_info"])
         self.assertIsNone(data["traffic_info"])
+        self.assertIsNone(data["parental_schedules"])
 
     def test_sync_devices_synchronous(self):
         module, _domoticz = load_plugin()
@@ -925,6 +1014,7 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin.get_guest_wifi_status = Mock(return_value=(False, None))
         plugin.get_wan_info = Mock(return_value={"external_ip": "1.1.1.1", "connected": True, "link_status": "up"})
         plugin.get_traffic_info = Mock(return_value={"rx_bytes": 0, "tx_bytes": 0, "rx_packets": 0, "tx_packets": 0})
+        plugin.get_parental_control_schedules = Mock(return_value={})
 
         # Test successful sync_devices(None)
         plugin.sync_devices(data=None)
@@ -937,6 +1027,7 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin.get_guest_wifi_status = Mock(side_effect=module.ExperiaV10PermissionDeniedError("guest perm err"))
         plugin.get_wan_info = Mock(side_effect=Exception("wan err"))
         plugin.get_traffic_info = Mock(side_effect=module.ExperiaV10PermissionDeniedError("traffic perm err"))
+        plugin.get_parental_control_schedules = Mock(side_effect=module.ExperiaV10PermissionDeniedError("parental perm err"))
 
         plugin.sync_devices(data=None)  # Should not raise exception
 
@@ -1067,6 +1158,247 @@ class ExperiaPluginTests(unittest.TestCase):
         devices = plugin.get_devices()
         self.assertEqual(len(devices), 1)
         self.assertEqual(devices[0]["mac"], "AA:BB:CC:DD:EE:FF")
+
+    def test_get_parental_control_schedules_parsing(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        fake_response = {
+            "status": True,
+            "data": {
+                "scheduleInfo": [
+                    {
+                        "ID": "AA:BB:CC:DD:EE:01",
+                        "enable": True,
+                        "override": "Disable",
+                        "value": "Disable",
+                        "schedule": [],
+                    },
+                    {
+                        "ID": "AA:BB:CC:DD:EE:02",
+                        "enable": False,
+                        "override": "",
+                        "value": "Enable",
+                        "schedule": [],
+                    },
+                    {
+                        "ID": "AA:BB:CC:DD:EE:03",
+                        "enable": True,
+                        "override": "",
+                        "value": "Enable",
+                        "schedule": [{"state": "Disable", "begin": 36000, "end": 43200}],
+                    },
+                ]
+            },
+        }
+
+        with patch.object(plugin, "_request", return_value=fake_response) as mock_req:
+            schedules = plugin.get_parental_control_schedules()
+            mock_req.assert_called_once_with(
+                service="Scheduler",
+                method="getCompleteSchedules",
+                parameters={"type": "ToD"},
+                endpoint="ws/NeMo/Intf/lan:getMIBs",
+            )
+
+        self.assertFalse(schedules["AA:BB:CC:DD:EE:01"]["scheduled"])
+        self.assertTrue(schedules["AA:BB:CC:DD:EE:01"]["blocked"])
+
+        self.assertFalse(schedules["AA:BB:CC:DD:EE:02"]["scheduled"])
+        self.assertFalse(schedules["AA:BB:CC:DD:EE:02"]["blocked"])
+
+        self.assertTrue(schedules["AA:BB:CC:DD:EE:03"]["scheduled"])
+        self.assertFalse(schedules["AA:BB:CC:DD:EE:03"]["blocked"])
+
+    def test_set_parental_control_block_existing_and_new(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        # Case 1: schedule exists -> overrideSchedule
+        calls = []
+
+        def fake_req(service, method, parameters=None, endpoint="ws"):
+            calls.append((service, method, parameters, endpoint))
+            if method == "getSchedule":
+                return {"status": True, "data": {}}
+            return {"status": True}
+
+        with patch.object(plugin, "_request", side_effect=fake_req):
+            plugin.set_parental_control("AA:BB:CC:DD:EE:01", block=True)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], "getSchedule")
+        self.assertEqual(calls[1][1], "overrideSchedule")
+        self.assertEqual(calls[1][2]["override"], "Disable")
+
+        # Case 2: schedule does not exist -> addSchedule
+        calls.clear()
+
+        def fake_req_not_found(service, method, parameters=None, endpoint="ws"):
+            calls.append((service, method, parameters, endpoint))
+            if method == "getSchedule":
+                return {"status": False}
+            return {"status": True}
+
+        with patch.object(plugin, "_request", side_effect=fake_req_not_found):
+            plugin.set_parental_control("AA:BB:CC:DD:EE:02", block=True)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], "getSchedule")
+        self.assertEqual(calls[1][1], "addSchedule")
+        self.assertEqual(calls[1][2]["info"]["override"], "Disable")
+
+    def test_set_parental_control_unblock(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        calls = []
+
+        def fake_req(service, method, parameters=None, endpoint="ws"):
+            calls.append((service, method, parameters, endpoint))
+            return {"status": True}
+
+        with patch.object(plugin, "_request", side_effect=fake_req):
+            plugin.set_parental_control("AA:BB:CC:DD:EE:01", block=False)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], "overrideSchedule")
+        self.assertEqual(calls[0][2]["override"], "Enable")
+        self.assertEqual(calls[1][1], "removeSchedules")
+        self.assertEqual(calls[1][2]["ID"], ["AA:BB:CC:DD:EE:01"])
+
+    def test_sync_tracked_devices_creates_and_updates_parental_units(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        devices = [
+            {"mac": "AA:BB:CC:DD:EE:01", "name": "Phone", "ip": "192.168.2.10", "active": True},
+            {"mac": "AA:BB:CC:DD:EE:02", "name": "Tablet", "ip": "192.168.2.11", "active": False},
+        ]
+        schedules = {
+            "AA:BB:CC:DD:EE:01": {"scheduled": False, "blocked": True},
+            "AA:BB:CC:DD:EE:02": {"scheduled": True, "blocked": False},
+        }
+
+        plugin._sync_tracked_devices(devices, schedules)
+
+        devs = module.Devices
+        phone_u1 = devs["AA:BB:CC:DD:EE:01"].Units[1]
+        phone_u2 = devs["AA:BB:CC:DD:EE:01"].Units[2]
+        self.assertEqual(phone_u1.Name, "Phone")
+        self.assertEqual(phone_u1.sValue, "On")
+        self.assertEqual(phone_u2.Name, "Phone - Internet Access")
+        self.assertEqual(phone_u2.sValue, "Off")
+        self.assertEqual(phone_u2.TypeName, "Switch")
+        self.assertEqual(phone_u2.SwitchType, 0)
+        self.assertNotIn("AA:BB:CC:DD:EE:01", plugin.scheduled_macs)
+
+        tab_u1 = devs["AA:BB:CC:DD:EE:02"].Units[1]
+        tab_u2 = devs["AA:BB:CC:DD:EE:02"].Units[2]
+        self.assertEqual(tab_u1.Name, "Tablet")
+        self.assertEqual(tab_u1.sValue, "Off")
+        self.assertEqual(tab_u2.Name, "Tablet - Internet Access")
+        self.assertEqual(tab_u2.sValue, "On")
+        self.assertEqual(tab_u2.TypeName, "Contact")
+        self.assertEqual(tab_u2.SwitchType, 2)
+        self.assertIn("AA:BB:CC:DD:EE:02", plugin.scheduled_macs)
+
+        # Router changes name of Phone -> 'Vincent Phone'
+        devices[0]["name"] = "Vincent Phone"
+        plugin._sync_tracked_devices(devices, schedules)
+
+        self.assertEqual(phone_u1.Name, "Vincent Phone")
+        self.assertEqual(phone_u2.Name, "Vincent Phone - Internet Access")
+
+        # Tablet transitions from scheduled to manual
+        schedules["AA:BB:CC:DD:EE:02"] = {"scheduled": False, "blocked": False}
+        plugin._sync_tracked_devices(devices, schedules)
+        self.assertEqual(tab_u2.TypeName, "Switch")
+        self.assertEqual(tab_u2.SwitchType, 0)
+        self.assertNotIn("AA:BB:CC:DD:EE:02", plugin.scheduled_macs)
+
+    def test_on_command_unit_2_scheduled_rejection(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin.scheduled_macs.add("AA:BB:CC:DD:EE:01")
+
+        module.Domoticz.Unit(
+            Name="Phone - Internet Access",
+            DeviceID="AA:BB:CC:DD:EE:01",
+            Unit=2,
+            TypeName="Contact",
+        ).Create()
+
+        with patch.object(plugin, "set_parental_control") as mock_set:
+            plugin.onCommand("AA:BB:CC:DD:EE:01", 2, "Off", 0, "")
+            mock_set.assert_not_called()
+
+        errors = [err for err in _domoticz.errors if "Cannot toggle Internet Access" in err]
+        self.assertEqual(len(errors), 1)
+
+    def test_on_command_unit_2_manual_switch(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        module.Domoticz.Unit(
+            Name="Phone - Internet Access",
+            DeviceID="AA:BB:CC:DD:EE:01",
+            Unit=2,
+            TypeName="Switch",
+        ).Create()
+
+        with patch.object(plugin, "set_parental_control") as mock_set:
+            plugin.onCommand("AA:BB:CC:DD:EE:01", 2, "Off", 0, "")
+            for t in list(plugin.command_threads):
+                t.join(timeout=1.0)
+            mock_set.assert_called_once_with("AA:BB:CC:DD:EE:01", True)
+
+        plugin.onHeartbeat()
+        u2 = module.Devices["AA:BB:CC:DD:EE:01"].Units[2]
+        self.assertEqual(u2.sValue, "Off")
+        self.assertEqual(u2.nValue, 0)
+
+    def test_on_device_modified_unit_1_updates_unit_2_and_router(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        u1 = module.Domoticz.Unit(Name="Phone", DeviceID="AA:BB:CC:DD:EE:01", Unit=1, TypeName="Switch").Create()
+        u2 = module.Domoticz.Unit(Name="Phone - Internet Access", DeviceID="AA:BB:CC:DD:EE:01", Unit=2, TypeName="Switch").Create()
+
+        u1.Name = "New Phone Name"
+
+        router_calls = []
+
+        def fake_req(service, method, parameters=None, endpoint="ws"):
+            router_calls.append((service, method, parameters))
+            if method == "get":
+                return {"status": {"Name": "Phone"}}
+            return {"status": True}
+
+        with patch.object(plugin, "_request", side_effect=fake_req):
+            plugin.onDeviceModified("AA:BB:CC:DD:EE:01", 1)
+            for t in list(plugin.command_threads):
+                t.join(timeout=1.0)
+
+        # Unit 2 name updated in Domoticz
+        self.assertEqual(u2.Name, "New Phone Name - Internet Access")
+        # Router received setName call with new name
+        set_name_calls = [c for c in router_calls if c[1] == "setName"]
+        self.assertEqual(len(set_name_calls), 1)
+        self.assertEqual(set_name_calls[0][2], {"name": "New Phone Name"})
+
+    def test_on_device_modified_unit_2_ignored(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        module.Domoticz.Unit(Name="Phone", DeviceID="AA:BB:CC:DD:EE:01", Unit=1, TypeName="Switch").Create()
+        module.Domoticz.Unit(Name="Custom Internet Name", DeviceID="AA:BB:CC:DD:EE:01", Unit=2, TypeName="Switch").Create()
+
+        with patch.object(plugin, "_request") as mock_req:
+            plugin.onDeviceModified("AA:BB:CC:DD:EE:01", 2)
+            for t in list(plugin.command_threads):
+                t.join(timeout=1.0)
+            mock_req.assert_not_called()
 
 
 if __name__ == "__main__":

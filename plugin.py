@@ -29,6 +29,12 @@
                 <option label="5m" value="300"/>
             </options>
         </param>
+        <param field="Mode3" label="Parental Control" width="75px">
+            <options>
+                <option label="Yes" value="True" default="true" />
+                <option label="No" value="False" />
+            </options>
+        </param>
     </params>
 </plugin>
 """
@@ -56,6 +62,26 @@ _OPTIONAL_PERMISSION_DENIED_SERVICES = {
     "NMC.Wifi",
 }
 _CONTEXT_REFRESH_INTERVAL = 25 * 60
+_SPECIAL_DEVICE_IDS = {
+    "WIFI",
+    "GUEST_WIFI",
+    "WAN_STATUS",
+    "WAN_IP",
+    "WAN_LINK_STATUS",
+    "TRAFFIC_RX",
+    "TRAFFIC_TX",
+    "THROUGHPUT_DOWN",
+    "THROUGHPUT_UP",
+    "CLIENT_COUNT",
+    "NEW_DEVICE",
+    "LAST_NEW_DEVICE",
+    "ROUTER_INFO",
+    "ROUTER_MODEL",
+    "ROUTER_SOFTWARE",
+    "ROUTER_SERIAL",
+    "ROUTER_UPTIME",
+    "REBOOT_MODEM",
+}
 
 
 class ExperiaV10ApiError(Exception):
@@ -97,11 +123,14 @@ class ExperiaPlugin:
         self.known_macs = None
         self.last_new_device_time = None
         self.last_new_device_info = None
+        self.scheduled_macs = set()
+        self.enable_parental_control = True
 
     def onStart(self):
         Domoticz.Log("onStart called")
         self.track_wired = (Parameters.get("Mode1", "False") == "True")
         self.poll_interval = int(Parameters.get("Mode2") or "30")
+        self.enable_parental_control = (Parameters.get("Mode3", "True") != "False")
 
         # Start background polling thread
         self.stop_event.clear()
@@ -194,6 +223,15 @@ class ExperiaPlugin:
         except Exception as e:
             Domoticz.Error(f"Error fetching Traffic info: {e}")
 
+        parental_schedules = None
+        if self.enable_parental_control:
+            try:
+                parental_schedules = self.get_parental_control_schedules()
+            except ExperiaV10PermissionDeniedError as e:
+                self._debug(f"Optional parental control schedules unavailable: {e}")
+            except Exception as e:
+                Domoticz.Error(f"Error fetching parental control schedules: {e}")
+
         return {
             "devices": devices,
             "router_info": router_info,
@@ -201,6 +239,7 @@ class ExperiaPlugin:
             "guest_wifi": guest_wifi,
             "wan_info": wan_info,
             "traffic_info": traffic_info,
+            "parental_schedules": parental_schedules,
         }
 
     def _debug(self, message):
@@ -378,8 +417,17 @@ class ExperiaPlugin:
                 Domoticz.Error(f"Error fetching devices: {e}")
                 devices = None
 
+            parental_schedules = None
+            if self.enable_parental_control:
+                try:
+                    parental_schedules = self.get_parental_control_schedules()
+                except ExperiaV10PermissionDeniedError as e:
+                    self._debug(f"Optional parental control schedules unavailable: {e}")
+                except Exception as e:
+                    Domoticz.Error(f"Error fetching parental control schedules: {e}")
+
             if devices is not None:
-                self._sync_tracked_devices(devices)
+                self._sync_tracked_devices(devices, parental_schedules)
                 self._sync_client_diagnostics(devices)
 
             try:
@@ -415,8 +463,9 @@ class ExperiaPlugin:
         else:
             # Asynchronous path using pre-fetched data
             devices = data.get("devices")
+            parental_schedules = data.get("parental_schedules") if self.enable_parental_control else None
             if devices is not None:
-                self._sync_tracked_devices(devices)
+                self._sync_tracked_devices(devices, parental_schedules)
                 self._sync_client_diagnostics(devices)
 
             router_info = data.get("router_info")
@@ -460,7 +509,7 @@ class ExperiaPlugin:
             Domoticz.Log("Creating Reboot Modem button")
             Domoticz.Unit(Name="Reboot Modem", DeviceID="REBOOT_MODEM", Unit=1, Type=244, Subtype=73, Switchtype=9).Create()
 
-    def _sync_tracked_devices(self, devices):
+    def _sync_tracked_devices(self, devices, parental_schedules=None):
         for dev in devices:
             mac = dev["mac"]
             name = dev["name"]
@@ -499,6 +548,72 @@ class ExperiaPlugin:
                         ha_unit.Update(Log=True, UpdateProperties=True)
                     else:
                         ha_unit.Update(Log=True)
+
+            # Unit 2: Parental Control (Internet Access)
+            if self.enable_parental_control:
+                sched_entry = (parental_schedules or {}).get(mac.upper(), {})
+                is_scheduled = sched_entry.get("scheduled", False)
+                is_blocked = sched_entry.get("blocked", False)
+
+                if is_scheduled:
+                    self.scheduled_macs.add(mac.upper())
+                else:
+                    self.scheduled_macs.discard(mac.upper())
+
+                internet_on = not is_blocked
+                pc_n_val = 1 if internet_on else 0
+                pc_s_val = "On" if internet_on else "Off"
+                expected_pc_name = f"{name} - Internet Access"
+                expected_type_name = "Contact" if is_scheduled else "Switch"
+                expected_switch_type = 2 if is_scheduled else 0
+
+                pc_unit_num = 2
+                if device_id not in Devices or pc_unit_num not in Devices[device_id].Units:
+                    Domoticz.Log(f"Creating parental control device for {name} ({mac}) [{expected_type_name}]")
+                    Domoticz.Unit(
+                        Name=expected_pc_name,
+                        DeviceID=device_id,
+                        Unit=pc_unit_num,
+                        TypeName=expected_type_name,
+                    ).Create()
+
+                if device_id in Devices and pc_unit_num in Devices[device_id].Units:
+                    pc_unit = Devices[device_id].Units[pc_unit_num]
+                    pc_needs_update = False
+                    pc_update_props = False
+
+                    if pc_unit.nValue != pc_n_val or pc_unit.sValue != pc_s_val:
+                        pc_needs_update = True
+
+                    if pc_unit.Name != expected_pc_name:
+                        pc_needs_update = True
+                        pc_update_props = True
+                        Domoticz.Log(f"Device name changed from '{pc_unit.Name}' to '{expected_pc_name}'")
+
+                    current_switch_type = getattr(pc_unit, "SwitchType", getattr(pc_unit, "Switchtype", None))
+                    if current_switch_type is not None and current_switch_type != expected_switch_type:
+                        pc_needs_update = True
+                        pc_update_props = True
+                        if hasattr(pc_unit, "SwitchType"):
+                            pc_unit.SwitchType = expected_switch_type
+                        if hasattr(pc_unit, "Switchtype"):
+                            pc_unit.Switchtype = expected_switch_type
+
+                    if pc_needs_update:
+                        Domoticz.Log(f"Updating parental control device {expected_pc_name} ({mac}) to {pc_s_val}")
+                        pc_unit.nValue = pc_n_val
+                        pc_unit.sValue = pc_s_val
+                        if pc_update_props:
+                            pc_unit.Name = expected_pc_name
+                            try:
+                                pc_unit.Update(Log=True, TypeName=expected_type_name, UpdateProperties=True)
+                            except TypeError:
+                                try:
+                                    pc_unit.Update(Log=True, TypeName=expected_type_name)
+                                except TypeError:
+                                    pc_unit.Update(Log=True)
+                        else:
+                            pc_unit.Update(Log=True)
 
     def _sync_client_diagnostics(self, devices):
         active_clients = len([device for device in devices if device["active"]])
@@ -710,6 +825,106 @@ class ExperiaPlugin:
         if enable:
             self._request("NeMo.Intf.vap2g0priv", "set", {"PersistentEnable": True}, endpoint="ws")
             self._request("NeMo.Intf.vap5g0priv", "set", {"PersistentEnable": True}, endpoint="ws")
+
+    def get_parental_control_schedules(self):
+        """Fetch parental control (ToD) schedules from the router."""
+        response = self._request(
+            service="Scheduler",
+            method="getCompleteSchedules",
+            parameters={"type": "ToD"},
+            endpoint="ws/NeMo/Intf/lan:getMIBs",
+        )
+        schedules = {}
+        if not response or not isinstance(response, dict):
+            return schedules
+
+        data = response.get("data")
+        if not isinstance(data, dict):
+            if "scheduleInfo" in response:
+                data = response
+            else:
+                return schedules
+
+        schedule_list = data.get("scheduleInfo")
+        if not isinstance(schedule_list, list):
+            return schedules
+
+        for item in schedule_list:
+            if not isinstance(item, dict):
+                continue
+            mac = item.get("ID")
+            if not mac:
+                continue
+            rules = item.get("schedule")
+            is_scheduled = bool(isinstance(rules, list) and len(rules) > 0)
+            val = str(item.get("value", "")).lower()
+            override = str(item.get("override", "")).lower()
+            is_blocked = (val == "disable" or override == "disable")
+
+            schedules[mac.upper()] = {
+                "scheduled": is_scheduled,
+                "blocked": is_blocked,
+                "rules": rules if isinstance(rules, list) else [],
+                "override": item.get("override"),
+                "value": item.get("value"),
+            }
+
+        return schedules
+
+    def set_parental_control(self, mac, block: bool):
+        """Set parental control for a device: block or unblock internet access."""
+        mac = mac.upper()
+        if block:
+            schedule_exists = False
+            try:
+                sched_resp = self._request(
+                    service="Scheduler",
+                    method="getSchedule",
+                    parameters={"type": "ToD", "ID": mac},
+                    endpoint="ws",
+                )
+                if sched_resp and isinstance(sched_resp, dict) and sched_resp.get("status"):
+                    schedule_exists = True
+            except Exception as e:
+                self._debug(f"getSchedule for {mac} returned error: {e}")
+
+            if schedule_exists:
+                self._request(
+                    service="Scheduler",
+                    method="overrideSchedule",
+                    parameters={"type": "ToD", "ID": mac, "override": "Disable"},
+                    endpoint="ws",
+                )
+            else:
+                self._request(
+                    service="Scheduler",
+                    method="addSchedule",
+                    parameters={
+                        "type": "ToD",
+                        "info": {
+                            "base": "Weekly",
+                            "def": "Enable",
+                            "ID": mac,
+                            "schedule": [],
+                            "enable": True,
+                            "override": "Disable",
+                        },
+                    },
+                    endpoint="ws",
+                )
+        else:
+            self._request(
+                service="Scheduler",
+                method="overrideSchedule",
+                parameters={"type": "ToD", "ID": mac, "override": "Enable"},
+                endpoint="ws",
+            )
+            self._request(
+                service="Scheduler",
+                method="removeSchedules",
+                parameters={"type": "ToD", "ID": [mac]},
+                endpoint="ws",
+            )
 
     def _build_request(self, url, payload, headers):
         req = urllib.request.Request(url, json.dumps(payload).encode("utf-8"))
@@ -1112,6 +1327,31 @@ class ExperiaPlugin:
             t = threading.Thread(name="ExperiaV10_Reboot", target=reboot_modem)
             self.command_threads.append(t)
             t.start()
+        elif Unit == 2 and DeviceID not in _SPECIAL_DEVICE_IDS:
+            if not self.enable_parental_control:
+                return
+            mac = DeviceID
+            if mac.upper() in self.scheduled_macs:
+                Domoticz.Error(f"Cannot toggle Internet Access for {mac}: device has an active schedule on the router")
+                if mac in Devices and Unit in Devices[mac].Units:
+                    ha_unit = Devices[mac].Units[Unit]
+                    self.queue.put(lambda u=ha_unit: u.Update(Log=False))
+                return
+
+            allow_internet = (Command.lower() == "on")
+            block = not allow_internet
+            Domoticz.Log(f"Setting Internet Access for {mac} to {allow_internet}")
+
+            def set_and_update_pc():
+                try:
+                    self.set_parental_control(mac, block)
+                    self.queue.put(lambda: self._update_command_unit(DeviceID, Unit, allow_internet))
+                except Exception as e:
+                    Domoticz.Error(f"Failed to set Internet Access for {mac}: {e}")
+
+            t = threading.Thread(name=f"ExperiaV10_SetParental_{mac}", target=set_and_update_pc)
+            self.command_threads.append(t)
+            t.start()
 
     def onDeviceModified(self, DeviceID, Unit):
         # Clean up dead threads
@@ -1120,33 +1360,23 @@ class ExperiaPlugin:
         if DeviceID not in Devices or Unit not in Devices[DeviceID].Units:
             return
 
-        ha_unit = Devices[DeviceID].Units[Unit]
-
-        special_devices = {
-            "WIFI",
-            "GUEST_WIFI",
-            "WAN_STATUS",
-            "WAN_IP",
-            "WAN_LINK_STATUS",
-            "TRAFFIC_RX",
-            "TRAFFIC_TX",
-            "THROUGHPUT_DOWN",
-            "THROUGHPUT_UP",
-            "CLIENT_COUNT",
-            "NEW_DEVICE",
-            "LAST_NEW_DEVICE",
-            "ROUTER_INFO",
-            "ROUTER_MODEL",
-            "ROUTER_SOFTWARE",
-            "ROUTER_SERIAL",
-            "ROUTER_UPTIME",
-            "REBOOT_MODEM",
-        }
-        if DeviceID in special_devices:
+        if Unit != 1 or DeviceID in _SPECIAL_DEVICE_IDS:
             return
 
+        ha_unit = Devices[DeviceID].Units[Unit]
         new_name = ha_unit.Name
         mac = DeviceID
+
+        # Also update Unit 2 (Internet Access) name in Domoticz when Unit 1 is modified
+        if self.enable_parental_control and mac in Devices and 2 in Devices[mac].Units:
+            pc_unit = Devices[mac].Units[2]
+            expected_pc_name = f"{new_name} - Internet Access"
+            if pc_unit.Name != expected_pc_name:
+                pc_unit.Name = expected_pc_name
+                try:
+                    pc_unit.Update(Log=True, UpdateProperties=True)
+                except TypeError:
+                    pc_unit.Update(Log=True)
 
         def update_router_name():
             try:
