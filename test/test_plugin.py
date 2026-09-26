@@ -598,13 +598,15 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin.onStop()
 
     def test_empty_poll_interval_uses_default(self):
-        module, _domoticz = load_plugin()
-        module.Parameters["Mode2"] = ""
-        plugin = module.ExperiaPlugin()
-        plugin.fetch_all_data = Mock(return_value={})
-        plugin.onStart()
-        self.assertEqual(plugin.poll_interval, 30)
-        plugin.onStop()
+        for val in ["", "null", "abc", "0", "-15", None]:
+            with self.subTest(val=val):
+                module, _domoticz = load_plugin()
+                module.Parameters["Mode2"] = val
+                plugin = module.ExperiaPlugin()
+                plugin.fetch_all_data = Mock(return_value={})
+                plugin.onStart()
+                self.assertEqual(plugin.poll_interval, 30)
+                plugin.onStop()
 
     def test_parental_control_toggle_parameter(self):
         module, _domoticz = load_plugin()
