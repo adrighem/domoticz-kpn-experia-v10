@@ -33,4 +33,4 @@ It periodically asks your router who is home, and flips a Domoticz switch for ea
 6. Click **Add** and watch the magic happen! ✨
 
 ## 📜 License
-Licensed under [GPLv3](LICENSE) — free to use, share, and improve.
+Licensed under [GPLv3](LICENSE) - free to use, share, and improve.

@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -957,16 +957,17 @@ class ExperiaPluginTests(unittest.TestCase):
             self.assertEqual(info["uptime"], 2000)
             self.assertEqual(mock_request.call_count, 2)
 
-        # Path 3: Primary returns 0 uptime, falls back to NMC query
+        # Path 3: Primary returns 0 uptime, falls back to Time sync and NMC query
         responses_nmc = [
             {"status": {"ModelName": "H369A", "UpTime": 0}},  # DeviceInfo returns 0 uptime
-            {"status": {"UpTime": 3000}}  # NMC query for uptime
+            {"status": {"time": "12:00"}},  # Time:getTime sync trigger
+            {"status": {"UpTime": 3000}},  # NMC query for uptime
         ]
         with patch.object(plugin, "_request", side_effect=responses_nmc) as mock_request:
             info = plugin.get_router_info()
             self.assertEqual(info["model"], "H369A")
             self.assertEqual(info["uptime"], 3000)
-            self.assertEqual(mock_request.call_count, 2)
+            self.assertEqual(mock_request.call_count, 3)
 
     def test_get_wan_info(self):
         module, _domoticz = load_plugin()
@@ -1430,6 +1431,164 @@ class ExperiaPluginTests(unittest.TestCase):
             for t in list(plugin.command_threads):
                 t.join(timeout=1.0)
             mock_req.assert_not_called()
+
+    def test_scheduler_optional_permission_denied(self):
+        module, _domoticz = load_plugin()
+        self.assertIn("Scheduler", module._OPTIONAL_PERMISSION_DENIED_SERVICES)
+
+        plugin = module.ExperiaPlugin()
+        plugin.context_id = "test-context"
+        plugin.cookie = "test-cookie"
+
+        # Mock urllib to return error 13 for Scheduler
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"errors": [{"error": 13, "description": "Permission denied"}]}).encode("utf-8")
+
+        with patch.object(module.urllib.request, "urlopen", return_value=mock_response):
+            with self.assertRaises(module.ExperiaV10PermissionDeniedError):
+                plugin._request("Scheduler", "getCompleteSchedules")
+
+        # Context should not be cleared for optional permission denied
+        self.assertEqual(plugin.context_id, "test-context")
+
+    def test_get_devices_track_wired_parameter_override(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin.track_wired = False
+
+        sample_devices = {
+            "status": [
+                {
+                    "PhysAddress": "AA:BB:CC:DD:EE:01",
+                    "Name": "Wired PC",
+                    "IPAddress": "192.168.2.10",
+                    "Active": True,
+                    "InterfaceName": "eth0",
+                    "Tags": "lan eth",
+                },
+                {
+                    "PhysAddress": "AA:BB:CC:DD:EE:02",
+                    "Name": "Wireless Phone",
+                    "IPAddress": "192.168.2.11",
+                    "Active": True,
+                    "InterfaceName": "wl0",
+                    "Tags": "wifi",
+                },
+            ]
+        }
+
+        with patch.object(plugin, "_request", return_value=sample_devices):
+            # Default behavior (track_wired=False): wired device excluded
+            devices_default = plugin.get_devices()
+            self.assertEqual(len(devices_default), 1)
+            self.assertEqual(devices_default[0]["mac"], "AA:BB:CC:DD:EE:02")
+
+            # Overridden with track_wired=True: both included
+            devices_all = plugin.get_devices(track_wired=True)
+            self.assertEqual(len(devices_all), 2)
+
+        plugin.track_wired = True
+        with patch.object(plugin, "_request", return_value=sample_devices):
+            # Overridden with track_wired=False: wired device excluded despite plugin setting
+            devices_wireless_only = plugin.get_devices(track_wired=False)
+            self.assertEqual(len(devices_wireless_only), 1)
+            self.assertEqual(devices_wireless_only[0]["mac"], "AA:BB:CC:DD:EE:02")
+
+    def test_set_device_name_changes_router(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        router_calls = []
+
+        def fake_req(service, method, parameters=None, endpoint="ws"):
+            router_calls.append((service, method, parameters))
+            if method == "get":
+                return {"status": {"Name": "Old Name"}}
+            return {"status": True}
+
+        with patch.object(plugin, "_request", side_effect=fake_req):
+            plugin.set_device_name("aa:bb:cc:dd:ee:01", "New Name")
+
+        set_calls = [c for c in router_calls if c[1] == "setName"]
+        self.assertEqual(len(set_calls), 1)
+        self.assertEqual(set_calls[0][0], "Devices.Device.AA:BB:CC:DD:EE:01")
+        self.assertEqual(set_calls[0][2], {"name": "New Name"})
+
+    def test_set_device_name_skips_when_unchanged(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        router_calls = []
+
+        def fake_req(service, method, parameters=None, endpoint="ws"):
+            router_calls.append((service, method, parameters))
+            if method == "get":
+                return {"status": {"Name": "Current Name"}}
+            return {"status": True}
+
+        with patch.object(plugin, "_request", side_effect=fake_req):
+            plugin.set_device_name("AA:BB:CC:DD:EE:01", "Current Name")
+
+        set_calls = [c for c in router_calls if c[1] == "setName"]
+        self.assertEqual(len(set_calls), 0)
+
+    def test_set_device_name_raises_and_logs_on_error(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        with patch.object(plugin, "_request", side_effect=module.ExperiaV10ApiError("Network timeout")):
+            with patch.object(module.Domoticz, "Error") as mock_err:
+                with self.assertRaises(module.ExperiaV10ApiError):
+                    plugin.set_device_name("AA:BB:CC:DD:EE:01", "New Name")
+                mock_err.assert_called_once()
+
+    def test_fetch_all_data_handles_permission_denied_devices_and_preserves_last(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        initial_devices = [{"mac": "AA:BB:CC:DD:EE:01", "name": "Phone", "ip": "192.168.2.10", "active": True}]
+        plugin.last_devices = initial_devices
+
+        plugin.get_devices = Mock(side_effect=module.ExperiaV10PermissionDeniedError("Access denied"))
+        plugin.get_router_info = Mock(return_value=None)
+        plugin.get_wifi_status = Mock(return_value=None)
+        plugin.get_guest_wifi_status = Mock(return_value=None)
+        plugin.get_wan_info = Mock(return_value=None)
+        plugin.get_traffic_info = Mock(return_value=None)
+        plugin.get_parental_control_schedules = Mock(return_value=None)
+
+        with patch.object(plugin, "_debug") as mock_debug, \
+             patch.object(module.Domoticz, "Error") as mock_err:
+            data = plugin.fetch_all_data()
+
+            # Debug logged, not error
+            mock_debug.assert_any_call("Optional devices query unavailable: Access denied")
+            mock_err.assert_not_called()
+            # Preserved last_devices
+            self.assertEqual(data["devices"], initial_devices)
+
+    def test_sync_devices_preserves_last_devices_on_transient_error(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin.track_devices = True
+
+        dev = [{"mac": "AA:BB:CC:DD:EE:01", "name": "Phone", "ip": "192.168.2.10", "active": True}]
+        plugin.sync_devices(data={"devices": dev})
+        self.assertEqual(plugin.last_devices, dev)
+        self.assertEqual(module.Devices["CLIENT_COUNT"].Units[1].sValue, "1")
+
+        # Transient error in synchronous sync_devices
+        with patch.object(plugin, "get_devices", side_effect=Exception("Transient connection reset")), \
+             patch.object(plugin, "_sync_router_info"), \
+             patch.object(plugin, "_sync_wifi_status"), \
+             patch.object(plugin, "_sync_guest_wifi_status"), \
+             patch.object(plugin, "_sync_wan_info"), \
+             patch.object(plugin, "_sync_traffic_info"):
+            plugin.sync_devices(data=None)
+
+        # last_devices still preserved and client count remains 1
+        self.assertEqual(plugin.last_devices, dev)
+        self.assertEqual(module.Devices["CLIENT_COUNT"].Units[1].sValue, "1")
 
 
 if __name__ == "__main__":

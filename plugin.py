@@ -3,7 +3,7 @@
 # Author: Vincent
 #
 """
-<plugin key="ExperiaV10" name="KPN Experia V10 Modem" author="Vincent" version="1.3.0" wikilink="https://github.com/domoticz/domoticz">
+<plugin key="ExperiaV10" name="KPN Experia V10 Modem" author="Vincent" version="1.3.1" wikilink="https://github.com/domoticz/domoticz">
     <description>
         <h2>KPN Experia V10 Modem</h2><br/>
         This plugin tracks connected devices to the KPN Experia V10 modem.
@@ -61,6 +61,7 @@ _OPTIONAL_PERMISSION_DENIED_SERVICES = {
     "Devices.Device.guest",
     "NeMo.Intf.eth0",
     "NMC.Wifi",
+    "Scheduler",
 }
 _CONTEXT_REFRESH_INTERVAL = 25 * 60
 _SPECIAL_DEVICE_IDS = {
@@ -127,6 +128,7 @@ class ExperiaPlugin:
         self.last_new_device_info = None
         self.scheduled_macs = set()
         self.enable_parental_control = True
+        self.last_devices = None
 
     def onStart(self):
         Domoticz.Log("onStart called")
@@ -193,8 +195,13 @@ class ExperiaPlugin:
         devices = None
         try:
             devices = self.get_devices()
+            self.last_devices = devices
+        except ExperiaV10PermissionDeniedError as e:
+            self._debug(f"Optional devices query unavailable: {e}")
+            devices = self.last_devices
         except Exception as e:
             Domoticz.Error(f"Error fetching devices: {e}")
+            devices = self.last_devices
 
         router_info = None
         try:
@@ -422,9 +429,13 @@ class ExperiaPlugin:
             # Synchronous path (mainly for backward compatibility in tests)
             try:
                 devices = self.get_devices()
+                self.last_devices = devices
+            except ExperiaV10PermissionDeniedError as e:
+                self._debug(f"Optional devices query unavailable: {e}")
+                devices = self.last_devices
             except Exception as e:
                 Domoticz.Error(f"Error fetching devices: {e}")
-                devices = None
+                devices = self.last_devices
 
             parental_schedules = None
             if self.enable_parental_control:
@@ -436,6 +447,7 @@ class ExperiaPlugin:
                     Domoticz.Error(f"Error fetching parental control schedules: {e}")
 
             if devices is not None:
+                self.last_devices = devices
                 if self.track_devices:
                     self._sync_tracked_devices(devices, parental_schedules)
                 self._sync_client_diagnostics(devices)
@@ -475,6 +487,7 @@ class ExperiaPlugin:
             devices = data.get("devices")
             parental_schedules = data.get("parental_schedules") if self.enable_parental_control else None
             if devices is not None:
+                self.last_devices = devices
                 if self.track_devices:
                     self._sync_tracked_devices(devices, parental_schedules)
                 self._sync_client_diagnostics(devices)
@@ -784,6 +797,7 @@ class ExperiaPlugin:
         uptime = int(status.get("UpTime", 0) or 0)
         if uptime == 0:
             try:
+                self._request("Time", "getTime")
                 nmc_data = self._request("NMC", "get")
                 nmc_status = nmc_data.get("status", {})
                 if isinstance(nmc_status, dict):
@@ -936,6 +950,27 @@ class ExperiaPlugin:
                 parameters={"type": "ToD", "ID": [mac]},
                 endpoint="ws",
             )
+
+    def set_device_name(self, mac, name):
+        """Set friendly name for a device on the router if changed."""
+        mac = mac.upper()
+        service = f"Devices.Device.{mac}"
+        try:
+            current_data = self._request(service, "get", {"flags": "full_links"}, endpoint="ws")
+            current_name = None
+            if (
+                isinstance(current_data, dict)
+                and "status" in current_data
+                and isinstance(current_data["status"], dict)
+            ):
+                current_name = current_data["status"].get("Name")
+
+            if current_name != name:
+                Domoticz.Log(f"Pushing name change for {mac} to Experia Box: '{name}'")
+                self._request(service, "setName", {"name": name}, endpoint="ws")
+        except Exception as e:
+            Domoticz.Error(f"Failed to update device name on router: {e}")
+            raise
 
     def _build_request(self, url, payload, headers):
         req = urllib.request.Request(url, json.dumps(payload).encode("utf-8"))
@@ -1221,7 +1256,10 @@ class ExperiaPlugin:
             if isinstance(children, list):
                 self._parse_topology(children, track_wired_devices, results, parent_is_wifi=is_wifi)
 
-    def get_devices(self):
+    def get_devices(self, track_wired=None):
+        if track_wired is None:
+            track_wired = self.track_wired
+
         results = {}
         successful_query = False
         last_error = None
@@ -1240,7 +1278,7 @@ class ExperiaPlugin:
                 successful_query = True
                 status = data.get("status")
                 if isinstance(status, list):
-                    self._parse_devices(status, self.track_wired, results)
+                    self._parse_devices(status, track_wired, results)
             except Exception as e:
                 last_error = e
                 self._debug(f"Failed to get devices via targeted query: {e}")
@@ -1257,7 +1295,7 @@ class ExperiaPlugin:
                     successful_query = True
                     status = data.get("status")
                     if isinstance(status, list):
-                        self._parse_topology(status, self.track_wired, results)
+                        self._parse_topology(status, track_wired, results)
                 except Exception as e:
                     last_error = e
                     self._debug(f"Failed to get {network} topology: {e}")
@@ -1391,17 +1429,9 @@ class ExperiaPlugin:
 
         def update_router_name():
             try:
-                service = f"Devices.Device.{mac}"
-                current_data = self._request(service, "get", {"flags": "full_links"}, endpoint="ws")
-                current_name = None
-                if isinstance(current_data, dict) and "status" in current_data and isinstance(current_data["status"], dict):
-                    current_name = current_data["status"].get("Name")
-
-                if current_name != new_name:
-                    Domoticz.Log(f"Pushing name change for {mac} to Experia Box: '{new_name}'")
-                    self._request(service, "setName", {"name": new_name}, endpoint="ws")
-            except Exception as e:
-                Domoticz.Error(f"Failed to update device name on router: {e}")
+                self.set_device_name(mac, new_name)
+            except Exception:
+                pass
 
         t = threading.Thread(name=f"ExperiaV10_Rename_{mac}", target=update_router_name)
         self.command_threads.append(t)
