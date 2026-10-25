@@ -13,10 +13,11 @@
         <param field="Address" label="IP Address" width="200px" required="true" default="192.168.2.254"/>
         <param field="Username" label="Username" width="200px" required="true" default="admin"/>
         <param field="Password" label="Password" width="200px" required="true" password="true"/>
-        <param field="Mode1" label="Track Wired Devices" width="75px">
+        <param field="Mode1" label="Track Devices" width="150px">
             <options>
-                <option label="Yes" value="True"/>
-                <option label="No" value="False" default="true" />
+                <option label="Wireless only" value="False" default="true" />
+                <option label="Wired + wireless" value="True"/>
+                <option label="None" value="None"/>
             </options>
         </param>
         <param field="Mode2" label="Poll Interval" width="75px" required="true" default="30">
@@ -106,6 +107,7 @@ class ExperiaPlugin:
         self.context_created_at = None
         self.context_lock = threading.RLock()
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        self.track_devices = True
         self.track_wired = False
         self.poll_interval = 30
         self.queue = queue.Queue()
@@ -128,13 +130,16 @@ class ExperiaPlugin:
 
     def onStart(self):
         Domoticz.Log("onStart called")
-        self.track_wired = (Parameters.get("Mode1", "False") == "True")
+        track_mode = Parameters.get("Mode1", "False")
+        self.track_devices = (track_mode != "None")
+        self.track_wired = (track_mode == "True")
         try:
             val = int(Parameters.get("Mode2", 30))
             self.poll_interval = val if val > 0 else 30
         except (ValueError, TypeError):
             self.poll_interval = 30
-        self.enable_parental_control = (Parameters.get("Mode3", "True") != "False")
+        # Parental control units live on tracked devices, so they need tracking enabled
+        self.enable_parental_control = self.track_devices and (Parameters.get("Mode3", "True") != "False")
 
         # Start background polling thread
         self.stop_event.clear()
@@ -431,7 +436,8 @@ class ExperiaPlugin:
                     Domoticz.Error(f"Error fetching parental control schedules: {e}")
 
             if devices is not None:
-                self._sync_tracked_devices(devices, parental_schedules)
+                if self.track_devices:
+                    self._sync_tracked_devices(devices, parental_schedules)
                 self._sync_client_diagnostics(devices)
 
             try:
@@ -469,7 +475,8 @@ class ExperiaPlugin:
             devices = data.get("devices")
             parental_schedules = data.get("parental_schedules") if self.enable_parental_control else None
             if devices is not None:
-                self._sync_tracked_devices(devices, parental_schedules)
+                if self.track_devices:
+                    self._sync_tracked_devices(devices, parental_schedules)
                 self._sync_client_diagnostics(devices)
 
             router_info = data.get("router_info")
