@@ -680,6 +680,35 @@ class ExperiaPluginTests(unittest.TestCase):
             plugin.onDeviceModified("AA:BB:CC:DD:EE:01", 1)
         self.assertEqual(devs["AA:BB:CC:DD:EE:01"].Units[2].Name, "Old Unit 2")
 
+    def test_track_devices_parameter(self):
+        module, _domoticz = load_plugin()
+        cases = (
+            ("False", True, False, True),
+            ("True", True, True, True),
+            ("None", False, False, False),
+        )
+        for mode, track_devices, track_wired, parental_control in cases:
+            with self.subTest(mode=mode):
+                module.Parameters["Mode1"] = mode
+                plugin = module.ExperiaPlugin()
+                plugin.fetch_all_data = Mock(return_value={})
+                plugin.onStart()
+                self.assertEqual(plugin.track_devices, track_devices)
+                self.assertEqual(plugin.track_wired, track_wired)
+                self.assertEqual(plugin.enable_parental_control, parental_control)
+                plugin.onStop()
+
+    def test_tracking_disabled_skips_device_units(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin.track_devices = False
+        devices = [{"mac": "AA:BB:CC:DD:EE:01", "name": "Phone", "ip": "192.168.2.10", "active": True}]
+
+        plugin.sync_devices(data={"devices": devices})
+
+        self.assertNotIn("AA:BB:CC:DD:EE:01", module.Devices)
+        self.assertEqual(module.Devices["CLIENT_COUNT"].Units[1].sValue, "1")
+
     def test_on_heartbeat_processes_queue(self):
         module, _domoticz = load_plugin()
         plugin = module.ExperiaPlugin()

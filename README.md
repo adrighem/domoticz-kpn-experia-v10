@@ -9,7 +9,7 @@ Welcome! This is a Python plugin for Domoticz designed to track the presence of 
 It periodically asks your router who is home, and flips a Domoticz switch for each MAC address it finds. Simple, effective, and hopefully magical! 🪄
 
 ## 🚀 Features
-* **Who's home?** Tracks all connected wireless devices (and optionally wired devices) using network topology traversal.
+* **Who's home?** Tracks all connected wireless devices (and optionally wired devices) using network topology traversal. Set **Track Devices** to **None** if you only want the router metrics and controls (handy when another tool already does presence detection).
 * **Parental control:** Monitors device internet access schedules and lets you block or unblock internet access for individual devices with a dedicated switch.
 * **The Big Buttons:** Reboot the router, toggle Global Wi-Fi, or toggle Guest Wi-Fi straight from Domoticz.
 * **Vitals:** Monitors Internet status, WAN link status, external IP, router model, software version, serial number, and uptime.
