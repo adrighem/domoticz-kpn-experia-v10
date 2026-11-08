@@ -679,40 +679,79 @@ class ExperiaPlugin:
         self._update_text_device("WAN_LINK_STATUS", "WAN Link Status", wan_info["link_status"])
 
     def _ensure_traffic_counter(self, device_id, name):
-        # The counter value is in KB. Users pick MB/GB per device via the Domoticz
-        # counter divider and value units, so only fill in the units when unset.
+        # Incremental counter: Domoticz adds every sValue sent to the stored total, so
+        # router counter resets never show up as negative usage. The value is in KB;
+        # users pick MB/GB per device via the Domoticz counter divider and value units.
         if device_id not in Devices or 1 not in Devices[device_id].Units:
             Domoticz.Log(f"Creating {name} counter")
             Domoticz.Unit(
                 Name=name,
                 DeviceID=device_id,
                 Unit=1,
-                Type=113,
-                Subtype=0,
+                Type=243,
+                Subtype=28,
                 Switchtype=3,
                 Options={"ValueQuantity": "Data", "ValueUnits": "KB"},
             ).Create()
             return
 
         unit = Devices[device_id].Units[1]
+        migrate = unit.Type == 113
         options = dict(unit.Options or {})
-        if not options.get("ValueUnits"):
+        add_units = not options.get("ValueUnits")
+        if not (migrate or add_units):
+            return
+
+        # MIGRATION (added 2026-11-08, remove in or after May 2027): convert the old
+        # RFXMeter counter (Type 113) in place, so its row and meter history are kept.
+        if migrate:
+            Domoticz.Log(f"Converting {name} to an incremental counter, history is kept")
+            unit.Type = 243
+            unit.SubType = 28
+        if add_units:
             options.setdefault("ValueQuantity", "Data")
             options["ValueUnits"] = "KB"
             unit.Options = options
-            unit.Update(Log=False, UpdateOptions=True)
+        # Every Update on an incremental counter adds sValue to the total, so add nothing
+        unit.nValue = 0
+        unit.sValue = "0"
+        unit.Update(Log=False, UpdateOptions=add_units)
+
+    def _counter_delta_kb(self, current_bytes, previous_bytes):
+        if previous_bytes is None:
+            return 0
+        if current_bytes < previous_bytes:
+            # Router counters reset (e.g. reboot): everything counted since is new traffic
+            return current_bytes // 1024
+        return current_bytes // 1024 - previous_bytes // 1024
+
+    def _add_to_counter(self, device_id, name, delta_kb):
+        if device_id not in Devices or 1 not in Devices[device_id].Units:
+            return
+
+        unit = Devices[device_id].Units[1]
+        rename = unit.Name != name
+        if delta_kb <= 0 and not rename:
+            return
+
+        if rename:
+            unit.Name = name
+        unit.nValue = 0
+        unit.sValue = str(max(delta_kb, 0))
+        if rename:
+            unit.Update(Log=True, UpdateProperties=True)
+        else:
+            unit.Update(Log=True)
 
     def _sync_traffic_info(self, traffic_info=None):
         if traffic_info is None:
             traffic_info = self.get_traffic_info()
 
         # Clean up old Custom Sensor devices if they exist
-        for old_dev in ["TRAFFIC_RX_MB", "TRAFFIC_TX_MB", "TRAFFIC_RX_INC", "TRAFFIC_TX_INC", "TRAFFIC_RX", "TRAFFIC_TX"]:
+        for old_dev in ["TRAFFIC_RX_MB", "TRAFFIC_TX_MB", "TRAFFIC_RX_INC", "TRAFFIC_TX_INC"]:
             if old_dev in Devices and 1 in Devices[old_dev].Units:
                 try:
-                    # Only delete if it's the broken TypeName="Counter" which ended up as Type 243 (General)
-                    if Devices[old_dev].Units[1].Type != 113:
-                        Devices[old_dev].Units[1].Delete()
+                    Devices[old_dev].Units[1].Delete()
                 except Exception as e:
                     Domoticz.Log(f"Notice: Failed to delete {old_dev} (may already be removed): {e}")
 
@@ -723,21 +762,21 @@ class ExperiaPlugin:
 
         rx_bytes = traffic_info["rx_bytes"]
         tx_bytes = traffic_info["tx_bytes"]
+        rx_delta_kb = 0
+        tx_delta_kb = 0
         if traffic_info_current:
+            rx_delta_kb = self._counter_delta_kb(rx_bytes, self.last_rx_bytes)
+            tx_delta_kb = self._counter_delta_kb(tx_bytes, self.last_tx_bytes)
             throughput_down, throughput_up = self._calculate_throughput(rx_bytes, tx_bytes)
             self.last_traffic_info = dict(traffic_info)
         else:
             throughput_down = self.last_throughput_down
             throughput_up = self.last_throughput_up
 
-        # Domoticz Counter type expects the absolute total value.
-        # Domoticz natively handles counter resets if the new value is lower than the previous one.
-        # We pass KB (divide by 1024) to keep it as an integer and avoid losing precision like we would with MBs.
-        rx_kb = rx_bytes // 1024
-        tx_kb = tx_bytes // 1024
-
-        self._update_unit("TRAFFIC_RX", "Data Received", nValue=0, sValue=str(rx_kb))
-        self._update_unit("TRAFFIC_TX", "Data Sent", nValue=0, sValue=str(tx_kb))
+        # Send KB since the last poll; whole KB keep the counter an integer. Deltas come from
+        # whole-KB totals, so rounding never accumulates.
+        self._add_to_counter("TRAFFIC_RX", "Data Received", rx_delta_kb)
+        self._add_to_counter("TRAFFIC_TX", "Data Sent", tx_delta_kb)
 
         # Calculate Mbps values
         throughput_down_mbps = (throughput_down * 8) / 1000000.0

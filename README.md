@@ -13,7 +13,7 @@ It periodically asks your router who is home, and flips a Domoticz switch for ea
 * **Parental control:** Monitors device internet access schedules and lets you block or unblock internet access for individual devices with a dedicated switch.
 * **The Big Buttons:** Reboot the router, toggle Global Wi-Fi, or toggle Guest Wi-Fi straight from Domoticz.
 * **Vitals:** Monitors Internet status, WAN link status, external IP, router model, software version, serial number, and uptime (in seconds for graphs, plus a readable `Xd HH:MM:SS` text device).
-* **Speed & Greed:** Keeps native Domoticz counters for total data received/sent and sensors for current download/upload speed. Counters report KB; to see MB or GB instead, edit the counter in Domoticz and set the divider to `1024` (MB) or `1048576` (GB) and the value units to match.
+* **Speed & Greed:** Keeps native Domoticz counters for total data received/sent and sensors for current download/upload speed. The counters are incremental, so router reboots never show up as negative usage; existing counters are converted on startup and keep their history. Counters report KB; to see MB or GB instead, edit the counter in Domoticz and set the divider to `1024` (MB) or `1048576` (GB) and the value units to match.
 * **Client diagnostics:** Shows active client count and briefly flags newly discovered devices.
 
 ## 🛠️ Installation
