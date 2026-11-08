@@ -17,7 +17,7 @@
             <options>
                 <option label="Wireless only" value="False" default="true" />
                 <option label="Wired + wireless" value="True"/>
-                <option label="None" value="None"/>
+                <option label="No tracking" value="None"/>
             </options>
         </param>
         <param field="Mode2" label="Poll Interval" width="75px" required="true" default="30">
@@ -130,7 +130,7 @@ class ExperiaPlugin:
         self.enable_parental_control = True
 
     def onStart(self):
-        Domoticz.Log("onStart called")
+        Domoticz.Log(f"onStart called, plugin version {Parameters.get('Version', 'unknown')}")
         track_mode = Parameters.get("Mode1", "False")
         self.track_devices = (track_mode != "None")
         self.track_wired = (track_mode == "True")
@@ -289,6 +289,12 @@ class ExperiaPlugin:
         if device_id not in Devices or 1 not in Devices[device_id].Units:
             Domoticz.Log(f"Creating {name} switch")
             Domoticz.Unit(Name=name, DeviceID=device_id, Unit=1, TypeName="Switch", **kwargs).Create()
+
+    def _format_uptime(self, seconds):
+        days, remainder = divmod(int(seconds or 0), 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
 
     def _format_number(self, value):
         if isinstance(value, float) and value.is_integer():
@@ -652,6 +658,7 @@ class ExperiaPlugin:
         self._update_text_device("ROUTER_SOFTWARE", "Router Software Version", router_info["software_version"])
         self._update_text_device("ROUTER_SERIAL", "Router Serial Number", router_info["serial_number"])
         self._update_custom_sensor("ROUTER_UPTIME", "Uptime", router_info["uptime"], "s")
+        self._update_text_device("ROUTER_UPTIME_TEXT", "Uptime (readable)", self._format_uptime(router_info["uptime"]))
         self.last_router_uptime = int(router_info["uptime"] or 0)
 
     def _sync_wifi_status(self, wifi_on=None):
@@ -671,6 +678,30 @@ class ExperiaPlugin:
         self._update_text_device("WAN_IP", "External IP", wan_info["external_ip"])
         self._update_text_device("WAN_LINK_STATUS", "WAN Link Status", wan_info["link_status"])
 
+    def _ensure_traffic_counter(self, device_id, name):
+        # The counter value is in KB. Users pick MB/GB per device via the Domoticz
+        # counter divider and value units, so only fill in the units when unset.
+        if device_id not in Devices or 1 not in Devices[device_id].Units:
+            Domoticz.Log(f"Creating {name} counter")
+            Domoticz.Unit(
+                Name=name,
+                DeviceID=device_id,
+                Unit=1,
+                Type=113,
+                Subtype=0,
+                Switchtype=3,
+                Options={"ValueQuantity": "Data", "ValueUnits": "KB"},
+            ).Create()
+            return
+
+        unit = Devices[device_id].Units[1]
+        options = dict(unit.Options or {})
+        if not options.get("ValueUnits"):
+            options.setdefault("ValueQuantity", "Data")
+            options["ValueUnits"] = "KB"
+            unit.Options = options
+            unit.Update(Log=False, UpdateOptions=True)
+
     def _sync_traffic_info(self, traffic_info=None):
         if traffic_info is None:
             traffic_info = self.get_traffic_info()
@@ -685,12 +716,8 @@ class ExperiaPlugin:
                 except Exception as e:
                     Domoticz.Log(f"Notice: Failed to delete {old_dev} (may already be removed): {e}")
 
-        if "TRAFFIC_RX" not in Devices or 1 not in Devices["TRAFFIC_RX"].Units:
-            Domoticz.Log("Creating Traffic RX Counter")
-            Domoticz.Unit(Name="Data Received (KB)", DeviceID="TRAFFIC_RX", Unit=1, Type=113, Subtype=0, Switchtype=3).Create()
-        if "TRAFFIC_TX" not in Devices or 1 not in Devices["TRAFFIC_TX"].Units:
-            Domoticz.Log("Creating Traffic TX Counter")
-            Domoticz.Unit(Name="Data Sent (KB)", DeviceID="TRAFFIC_TX", Unit=1, Type=113, Subtype=0, Switchtype=3).Create()
+        self._ensure_traffic_counter("TRAFFIC_RX", "Data Received")
+        self._ensure_traffic_counter("TRAFFIC_TX", "Data Sent")
 
         traffic_info, traffic_info_current = self._preserve_transient_traffic_info(traffic_info)
 
@@ -709,8 +736,8 @@ class ExperiaPlugin:
         rx_kb = rx_bytes // 1024
         tx_kb = tx_bytes // 1024
 
-        self._update_unit("TRAFFIC_RX", "Data Received (KB)", nValue=0, sValue=str(rx_kb))
-        self._update_unit("TRAFFIC_TX", "Data Sent (KB)", nValue=0, sValue=str(tx_kb))
+        self._update_unit("TRAFFIC_RX", "Data Received", nValue=0, sValue=str(rx_kb))
+        self._update_unit("TRAFFIC_TX", "Data Sent", nValue=0, sValue=str(tx_kb))
 
         # Calculate Mbps values
         throughput_down_mbps = (throughput_down * 8) / 1000000.0

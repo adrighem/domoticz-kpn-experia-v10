@@ -400,6 +400,7 @@ class ExperiaPluginTests(unittest.TestCase):
         self.assertEqual(devices["NEW_DEVICE"].Units[1].sValue, "Off")
         self.assertEqual(devices["LAST_NEW_DEVICE"].Units[1].sValue, "")
         self.assertEqual(devices["ROUTER_UPTIME"].Units[1].sValue, "3600")
+        self.assertEqual(devices["ROUTER_UPTIME_TEXT"].Units[1].sValue, "0d 01:00:00")
         self.assertIn("H369A", devices["ROUTER_INFO"].Units[1].sValue)
         self.assertEqual(devices["WAN_LINK_STATUS"].Units[1].sValue, "up")
         self.assertEqual(devices["THROUGHPUT_DOWN_MBPS"].Units[1].sValue, "0")
@@ -587,6 +588,49 @@ class ExperiaPluginTests(unittest.TestCase):
         # New Mbps devices should also be created and updated
         self.assertIn("THROUGHPUT_DOWN_MBPS", devices)
         self.assertIn("THROUGHPUT_UP_MBPS", devices)
+
+    def test_traffic_counters_created_with_kb_units(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        plugin._sync_traffic_info({"rx_bytes": 4096, "tx_bytes": 2048, "rx_packets": 1, "tx_packets": 1})
+        rx = module.Devices["TRAFFIC_RX"].Units[1]
+        self.assertEqual(rx.Name, "Data Received")
+        self.assertEqual(rx.Options, {"ValueQuantity": "Data", "ValueUnits": "KB"})
+        self.assertEqual(module.Devices["TRAFFIC_TX"].Units[1].Name, "Data Sent")
+
+    def test_traffic_counter_units_added_only_when_missing(self):
+        module, domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        domoticz.Unit(Name="Data Received (KB)", DeviceID="TRAFFIC_RX", Unit=1, Type=113, Subtype=0, Switchtype=3).Create()
+        domoticz.Unit(
+            Name="Data Sent (KB)", DeviceID="TRAFFIC_TX", Unit=1, Type=113, Subtype=0, Switchtype=3,
+            Options={"ValueQuantity": "Data", "ValueUnits": "GB"},
+        ).Create()
+        plugin._sync_traffic_info({"rx_bytes": 4096, "tx_bytes": 2048, "rx_packets": 1, "tx_packets": 1})
+        rx = module.Devices["TRAFFIC_RX"].Units[1]
+        tx = module.Devices["TRAFFIC_TX"].Units[1]
+        self.assertEqual(rx.Options, {"ValueQuantity": "Data", "ValueUnits": "KB"})
+        self.assertIn({"Log": False, "UpdateOptions": True}, rx.updates)
+        self.assertEqual(tx.Options["ValueUnits"], "GB")
+        self.assertNotIn({"Log": False, "UpdateOptions": True}, tx.updates)
+        self.assertEqual(rx.Name, "Data Received")
+
+    def test_format_uptime(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+        self.assertEqual(plugin._format_uptime(0), "0d 00:00:00")
+        self.assertEqual(plugin._format_uptime(59), "0d 00:00:59")
+        self.assertEqual(plugin._format_uptime(12 * 86400 + 3 * 3600 + 14 * 60 + 7), "12d 03:14:07")
+        self.assertEqual(plugin._format_uptime(None), "0d 00:00:00")
+
+    def test_onstart_logs_plugin_version(self):
+        module, domoticz = load_plugin()
+        module.Parameters["Version"] = "9.9.9"
+        plugin = module.ExperiaPlugin()
+        plugin.fetch_all_data = Mock(return_value={})
+        plugin.onStart()
+        plugin.onStop()
+        self.assertIn("onStart called, plugin version 9.9.9", domoticz.logs)
 
     def test_parameterized_poll_interval(self):
         module, _domoticz = load_plugin()
