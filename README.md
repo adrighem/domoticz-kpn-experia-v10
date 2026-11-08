@@ -9,11 +9,11 @@ Welcome! This is a Python plugin for Domoticz designed to track the presence of 
 It periodically asks your router who is home, and flips a Domoticz switch for each MAC address it finds. Simple, effective, and hopefully magical! 🪄
 
 ## 🚀 Features
-* **Who's home?** Tracks all connected wireless devices (and optionally wired devices) using network topology traversal. Set **Track Devices** to **None** if you only want the router metrics and controls (handy when another tool already does presence detection). Switching an existing setup to **None** leaves previously created device switches in place; they simply stop updating, so delete them by hand if you no longer need them.
+* **Who's home?** Tracks all connected wireless devices (and optionally wired devices) using network topology traversal. Set **Track Devices** to **No tracking** if you only want the router metrics and controls (handy when another tool already does presence detection). Switching an existing setup to **No tracking** leaves previously created device switches in place; they simply stop updating, so delete them by hand if you no longer need them.
 * **Parental control:** Monitors device internet access schedules and lets you block or unblock internet access for individual devices with a dedicated switch.
 * **The Big Buttons:** Reboot the router, toggle Global Wi-Fi, or toggle Guest Wi-Fi straight from Domoticz.
-* **Vitals:** Monitors Internet status, WAN link status, external IP, router model, software version, serial number, and uptime.
-* **Speed & Greed:** Keeps native Domoticz counters for total data received/sent and sensors for current download/upload speed.
+* **Vitals:** Monitors Internet status, WAN link status, external IP, router model, software version, serial number, and uptime (in seconds for graphs, plus a readable `Xd HH:MM:SS` text device).
+* **Speed & Greed:** Keeps native Domoticz counters for total data received/sent and sensors for current download/upload speed. Counters report KB; to see MB or GB instead, edit the counter in Domoticz and set the divider to `1024` (MB) or `1048576` (GB) and the value units to match.
 * **Client diagnostics:** Shows active client count and briefly flags newly discovered devices.
 
 ## 🛠️ Installation
