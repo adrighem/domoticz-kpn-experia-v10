@@ -34,6 +34,8 @@ class FakeUnit:
 
     def Update(self, **kwargs):
         self.updates.append(kwargs)
+        if self.SwitchType != self.Switchtype:
+            self.Switchtype = self.SwitchType
         if (self.Type, self.SubType) == (243, 28):
             # Domoticz adds an incremental counter's sValue to the stored total
             self.sValue = str(int(self.stored_sValue or 0) + int(self.sValue or 0))
@@ -458,6 +460,19 @@ class ExperiaPluginTests(unittest.TestCase):
 
     def test_sync_preserves_transient_zero_traffic_counters(self):
         module, domoticz = load_plugin()
+        domoticz.Unit(
+            Name="Data Received", DeviceID="TRAFFIC_RX", Unit=1, Type=243, Subtype=28, Switchtype=3,
+            Options={"ValueQuantity": "Data", "ValueUnits": "KB"},
+        ).Create()
+        domoticz.Unit(
+            Name="Data Sent", DeviceID="TRAFFIC_TX", Unit=1, Type=243, Subtype=28, Switchtype=3,
+            Options={"ValueQuantity": "Data", "ValueUnits": "KB"},
+        ).Create()
+        rx = module.Devices["TRAFFIC_RX"].Units[1]
+        tx = module.Devices["TRAFFIC_TX"].Units[1]
+        rx.stored_sValue = rx.sValue = "4"
+        tx.stored_sValue = tx.sValue = "2"
+
         plugin = module.ExperiaPlugin()
         previous_traffic = {
             "rx_bytes": 4096,
@@ -484,6 +499,8 @@ class ExperiaPluginTests(unittest.TestCase):
 
         self.assertEqual(module.Devices["TRAFFIC_RX"].Units[1].updates, [])
         self.assertEqual(module.Devices["TRAFFIC_TX"].Units[1].updates, [])
+        self.assertEqual(module.Devices["TRAFFIC_RX"].Units[1].sValue, "4")
+        self.assertEqual(module.Devices["TRAFFIC_TX"].Units[1].sValue, "2")
         self.assertEqual(module.Devices["THROUGHPUT_DOWN_MBPS"].Units[1].sValue, "10")
         self.assertEqual(module.Devices["THROUGHPUT_UP_MBPS"].Units[1].sValue, "5")
         self.assertEqual(plugin.last_rx_bytes, 4096)
@@ -496,7 +513,20 @@ class ExperiaPluginTests(unittest.TestCase):
         )
 
     def test_sync_accepts_zero_traffic_counters_after_reboot(self):
-        module, _domoticz = load_plugin()
+        module, domoticz = load_plugin()
+        domoticz.Unit(
+            Name="Data Received", DeviceID="TRAFFIC_RX", Unit=1, Type=243, Subtype=28, Switchtype=3,
+            Options={"ValueQuantity": "Data", "ValueUnits": "KB"},
+        ).Create()
+        domoticz.Unit(
+            Name="Data Sent", DeviceID="TRAFFIC_TX", Unit=1, Type=243, Subtype=28, Switchtype=3,
+            Options={"ValueQuantity": "Data", "ValueUnits": "KB"},
+        ).Create()
+        rx = module.Devices["TRAFFIC_RX"].Units[1]
+        tx = module.Devices["TRAFFIC_TX"].Units[1]
+        rx.stored_sValue = rx.sValue = "4"
+        tx.stored_sValue = tx.sValue = "2"
+
         plugin = module.ExperiaPlugin()
         previous_traffic = {
             "rx_bytes": 4096,
@@ -524,6 +554,8 @@ class ExperiaPluginTests(unittest.TestCase):
 
         self.assertEqual(module.Devices["TRAFFIC_RX"].Units[1].updates, [])
         self.assertEqual(module.Devices["TRAFFIC_TX"].Units[1].updates, [])
+        self.assertEqual(module.Devices["TRAFFIC_RX"].Units[1].sValue, "4")
+        self.assertEqual(module.Devices["TRAFFIC_TX"].Units[1].sValue, "2")
         self.assertEqual(module.Devices["THROUGHPUT_DOWN_MBPS"].Units[1].sValue, "0")
         self.assertEqual(module.Devices["THROUGHPUT_UP_MBPS"].Units[1].sValue, "0")
         self.assertEqual(plugin.last_rx_bytes, 0)
@@ -596,14 +628,27 @@ class ExperiaPluginTests(unittest.TestCase):
         self.assertIn("THROUGHPUT_UP_MBPS", devices)
 
     def test_traffic_counters_created_as_incremental_with_kb_units(self):
-        module, _domoticz = load_plugin()
+        module, domoticz = load_plugin()
         plugin = module.ExperiaPlugin()
         plugin._sync_traffic_info({"rx_bytes": 4096, "tx_bytes": 2048, "rx_packets": 1, "tx_packets": 1})
         rx = module.Devices["TRAFFIC_RX"].Units[1]
         self.assertEqual((rx.Type, rx.SubType, rx.Switchtype), (243, 28, 3))
         self.assertEqual(rx.Name, "Data Received")
+        self.assertEqual(rx.sValue, "0")
+        self.assertEqual(rx.updates, [{"Log": False}])
         self.assertEqual(rx.Options, {"ValueQuantity": "Data", "ValueUnits": "KB"})
         self.assertEqual(module.Devices["TRAFFIC_TX"].Units[1].Name, "Data Sent")
+        self.assertEqual(module.Devices["TRAFFIC_TX"].Units[1].sValue, "0")
+        self.assertEqual(module.Devices["TRAFFIC_TX"].Units[1].updates, [{"Log": False}])
+
+        # A second zero-delta poll produces no extra Update
+        plugin._sync_traffic_info({"rx_bytes": 4096, "tx_bytes": 2048, "rx_packets": 1, "tx_packets": 1})
+        self.assertEqual(rx.updates, [{"Log": False}])
+
+        # Domoticz refusing device creation is handled gracefully
+        with patch.object(domoticz, "Unit", return_value=Mock(Create=Mock())):
+            plugin._ensure_traffic_counter("REFUSED", "Refused")
+        self.assertNotIn("REFUSED", module.Devices)
 
     def test_traffic_counters_add_deltas_and_survive_router_reset(self):
         module, _domoticz = load_plugin()
@@ -633,7 +678,7 @@ class ExperiaPluginTests(unittest.TestCase):
     def test_rfxmeter_traffic_counter_migrated_in_place(self):
         module, domoticz = load_plugin()
         plugin = module.ExperiaPlugin()
-        domoticz.Unit(Name="Data Received (KB)", DeviceID="TRAFFIC_RX", Unit=1, Type=113, Subtype=0, Switchtype=3).Create()
+        domoticz.Unit(Name="Data Received (KB)", DeviceID="TRAFFIC_RX", Unit=1, Type=113, Subtype=0, Switchtype=0).Create()
         domoticz.Unit(
             Name="Data Sent (KB)", DeviceID="TRAFFIC_TX", Unit=1, Type=113, Subtype=0, Switchtype=3,
             Options={"ValueQuantity": "Data", "ValueUnits": "GB"},
@@ -646,18 +691,48 @@ class ExperiaPluginTests(unittest.TestCase):
         plugin._sync_traffic_info({"rx_bytes": 4096, "tx_bytes": 2048, "rx_packets": 1, "tx_packets": 1})
 
         self.assertIs(module.Devices["TRAFFIC_RX"].Units[1], rx)
-        self.assertEqual((rx.Type, rx.SubType, rx.Switchtype), (243, 28, 3))
+        self.assertEqual((rx.Type, rx.SubType, rx.SwitchType), (243, 28, 3))
+        self.assertEqual(rx.Name, "Data Received")
         self.assertEqual(rx.sValue, "5000")
         self.assertEqual(rx.Options, {"ValueQuantity": "Data", "ValueUnits": "KB"})
-        self.assertIn({"Log": False, "UpdateOptions": True}, rx.updates)
-        self.assertEqual((tx.Type, tx.SubType), (243, 28))
+        self.assertEqual(rx.updates, [{"Log": False, "UpdateOptions": True, "UpdateProperties": True}])
+        self.assertEqual((tx.Type, tx.SubType, tx.SwitchType), (243, 28, 3))
+        self.assertEqual(tx.Name, "Data Sent")
         self.assertEqual(tx.sValue, "700")
         self.assertEqual(tx.Options["ValueUnits"], "GB")
-        self.assertIn({"Log": False, "UpdateOptions": False}, tx.updates)
+        self.assertEqual(tx.updates, [{"Log": False, "UpdateOptions": False, "UpdateProperties": True}])
 
         plugin._sync_traffic_info({"rx_bytes": 3 * 4096, "tx_bytes": 2048, "rx_packets": 2, "tx_packets": 1})
         self.assertEqual(rx.sValue, "5008")
         self.assertEqual(rx.Name, "Data Received")
+
+    def test_sync_traffic_info_computes_deltas_alongside_throughput(self):
+        module, _domoticz = load_plugin()
+        plugin = module.ExperiaPlugin()
+
+        with patch.object(module.time, "monotonic", return_value=100.0):
+            plugin._sync_traffic_info(
+                {"rx_bytes": 1000 * 1024, "tx_bytes": 500 * 1024, "rx_packets": 10, "tx_packets": 5}
+            )
+
+        rx = module.Devices["TRAFFIC_RX"].Units[1]
+        tx = module.Devices["TRAFFIC_TX"].Units[1]
+        self.assertEqual(rx.sValue, "0")
+        self.assertEqual(tx.sValue, "0")
+        self.assertEqual(plugin.last_rx_bytes, 1000 * 1024)
+        self.assertEqual(plugin.last_tx_bytes, 500 * 1024)
+
+        with patch.object(module.time, "monotonic", return_value=110.0):
+            plugin._sync_traffic_info(
+                {"rx_bytes": 1300 * 1024, "tx_bytes": 600 * 1024, "rx_packets": 13, "tx_packets": 6}
+            )
+
+        self.assertEqual(rx.sValue, "300")
+        self.assertEqual(tx.sValue, "100")
+        self.assertEqual(module.Devices["THROUGHPUT_DOWN_MBPS"].Units[1].sValue, "0.25")
+        self.assertEqual(module.Devices["THROUGHPUT_UP_MBPS"].Units[1].sValue, "0.08")
+        self.assertEqual(plugin.last_rx_bytes, 1300 * 1024)
+        self.assertEqual(plugin.last_tx_bytes, 600 * 1024)
 
     def test_incremental_traffic_counter_left_alone(self):
         module, domoticz = load_plugin()

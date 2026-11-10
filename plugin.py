@@ -693,6 +693,11 @@ class ExperiaPlugin:
                 Switchtype=3,
                 Options={"ValueQuantity": "Data", "ValueUnits": "KB"},
             ).Create()
+            if device_id in Devices and 1 in Devices[device_id].Units:
+                unit = Devices[device_id].Units[1]
+                unit.nValue = 0
+                unit.sValue = "0"
+                unit.Update(Log=False)
             return
 
         unit = Devices[device_id].Units[1]
@@ -704,10 +709,14 @@ class ExperiaPlugin:
 
         # MIGRATION (added 2026-11-08, remove in or after May 2027): convert the old
         # RFXMeter counter (Type 113) in place, so its row and meter history are kept.
+        rename = migrate and unit.Name != name
         if migrate:
             Domoticz.Log(f"Converting {name} to an incremental counter, history is kept")
             unit.Type = 243
             unit.SubType = 28
+            unit.SwitchType = 3
+            if rename:
+                unit.Name = name
         if add_units:
             options.setdefault("ValueQuantity", "Data")
             options["ValueUnits"] = "KB"
@@ -715,7 +724,10 @@ class ExperiaPlugin:
         # Every Update on an incremental counter adds sValue to the total, so add nothing
         unit.nValue = 0
         unit.sValue = "0"
-        unit.Update(Log=False, UpdateOptions=add_units)
+        update_kwargs = {"Log": False, "UpdateOptions": add_units}
+        if rename:
+            update_kwargs["UpdateProperties"] = True
+        unit.Update(**update_kwargs)
 
     def _counter_delta_kb(self, current_bytes, previous_bytes):
         if previous_bytes is None:
@@ -765,9 +777,11 @@ class ExperiaPlugin:
         rx_delta_kb = 0
         tx_delta_kb = 0
         if traffic_info_current:
-            rx_delta_kb = self._counter_delta_kb(rx_bytes, self.last_rx_bytes)
-            tx_delta_kb = self._counter_delta_kb(tx_bytes, self.last_tx_bytes)
+            previous_rx_bytes = self.last_rx_bytes
+            previous_tx_bytes = self.last_tx_bytes
             throughput_down, throughput_up = self._calculate_throughput(rx_bytes, tx_bytes)
+            rx_delta_kb = self._counter_delta_kb(rx_bytes, previous_rx_bytes)
+            tx_delta_kb = self._counter_delta_kb(tx_bytes, previous_tx_bytes)
             self.last_traffic_info = dict(traffic_info)
         else:
             throughput_down = self.last_throughput_down
